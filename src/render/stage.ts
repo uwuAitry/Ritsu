@@ -163,8 +163,8 @@ export class StageRenderer {
     this.drawAtmosBadge(ctx, 110, 580, "left");
     // 5b 标题块右侧（小号，视觉中心对齐标题基线）
     this.drawAtmosBadge(ctx, 110 + this.titleWidth + 18, 884, "left", 12);
-    // 5c 进度条下（右对齐）
-    this.drawAtmosBadge(ctx, 1810, 1008, "right");
+    // 5c 进度条下（右对齐，让开右下角总时长文本）
+    this.drawAtmosBadge(ctx, 1700, 1008, "right");
 
     this.drawInfoBar(ctx);
   }
