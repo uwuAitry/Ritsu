@@ -2,7 +2,7 @@
 // 运行方式（浏览器控制台 / Node>=18）：
 //   import { runSelfCheck } from "./src/audio/selfcheck"; runSelfCheck();
 
-import { parseWavPcm } from "./wav";
+import { readWavInfo, decodeWavToStereo } from "./wav";
 
 function assert(cond: boolean, msg: string): void {
   if (!cond) throw new Error("audio selfcheck failed: " + msg);
@@ -52,35 +52,65 @@ function buildWav(spec: FmtSpec, data: number[]): ArrayBuffer {
 }
 
 export function runSelfCheck(): void {
-  // 16-bit 立体声 2 帧：L0=32767, R0=-32768, L1=0, R1=16384
+  // 16-bit 立体声 2 帧：frame0 L=R=0x7fff；frame1 L=0x0000, R=0x4000
   const stereo = buildWav(
     { audioFormat: 1, channelCount: 2, sampleRate: 48000, bitsPerSample: 16 },
-    [0xff, 0x7f, 0x00, 0x80, 0x00, 0x00, 0x00, 0x40],
+    [0xff, 0x7f, 0xff, 0x7f, 0x00, 0x00, 0x00, 0x40],
   );
-  const s = parseWavPcm(stereo);
+  const s = readWavInfo(stereo);
   assert(s !== null, "16-bit stereo not parsed");
   assert(s!.channelCount === 2, "stereo channelCount");
   assert(s!.frameCount === 2, "stereo frameCount");
   assert(s!.sampleRate === 48000, "stereo sampleRate");
-  assert(approx(s!.samples[0], 32767 / 32768), "stereo L0");
-  assert(approx(s!.samples[1], -1), "stereo R0");
-  assert(approx(s!.samples[2], 0), "stereo L1");
-  assert(approx(s!.samples[3], 0.5), "stereo R1");
+  // 头 44 字节后即第一样本帧；读取 dataOffset 处应得 L0 = 0x7fff。
+  assert(s!.dataOffset === 44, "stereo dataOffset");
+  assert(
+    new DataView(stereo).getInt16(s!.dataOffset, true) === 0x7fff,
+    "dataOffset points at first sample frame",
+  );
+
+  const sl = new Float32Array(2);
+  const sr = new Float32Array(2);
+  decodeWavToStereo(stereo, s!, sl, sr);
+  // 降混为平均：frame0 两声道均 32767/32768；frame1 平均 (0 + 0.5)/2 = 0.25。
+  assert(approx(sl[0], 32767 / 32768), "stereo L0");
+  assert(approx(sr[0], 32767 / 32768), "stereo R0");
+  assert(approx(sl[1], 0.25), "stereo L1");
+  assert(approx(sr[1], 0.25), "stereo R1");
 
   // 24-bit 单声道 1 帧：0x400000 = 0.5
   const mono24 = buildWav(
     { audioFormat: 1, channelCount: 1, sampleRate: 48000, bitsPerSample: 24 },
     [0x00, 0x00, 0x40],
   );
-  const m = parseWavPcm(mono24);
+  const m = readWavInfo(mono24);
   assert(m !== null, "24-bit mono not parsed");
   assert(m!.channelCount === 1, "mono channelCount");
   assert(m!.frameCount === 1, "mono frameCount");
-  assert(approx(m!.samples[0], 0.5), "mono sample");
+  const ml = new Float32Array(1);
+  const mr = new Float32Array(1);
+  decodeWavToStereo(mono24, m!, ml, mr);
+  assert(approx(ml[0], 0.5), "mono L");
+  assert(approx(mr[0], 0.5), "mono R");
+
+  // 4 声道 16-bit 单帧：0x4000, 0x4000, 0x0000, 0x0000 → 平均 0.25
+  const quad = buildWav(
+    { audioFormat: 1, channelCount: 4, sampleRate: 48000, bitsPerSample: 16 },
+    [0x00, 0x40, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00],
+  );
+  const q = readWavInfo(quad);
+  assert(q !== null, "4ch not parsed");
+  assert(q!.channelCount === 4, "4ch channelCount");
+  assert(q!.frameCount === 1, "4ch frameCount");
+  const ql = new Float32Array(1);
+  const qr = new Float32Array(1);
+  decodeWavToStereo(quad, q!, ql, qr);
+  assert(approx(ql[0], 0.25), "4ch downmix L");
+  assert(approx(qr[0], 0.25), "4ch downmix R");
 
   // 非 WAV → null
   assert(
-    parseWavPcm(new Uint8Array(64).buffer as ArrayBuffer) === null,
+    readWavInfo(new Uint8Array(64).buffer as ArrayBuffer) === null,
     "non-WAV should be null",
   );
 }

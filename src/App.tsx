@@ -6,7 +6,6 @@ import { BackgroundRender } from "@applemusic-like-lyrics/react";
 import type { LyricLine } from "@applemusic-like-lyrics/core";
 import "@applemusic-like-lyrics/core/style.css";
 
-import { parseAdmBwf } from "./adm/parse";
 import { AudioEngine } from "./audio/engine";
 import { exportVideo, pickMimeType } from "./export/recorder";
 import { loadLyricFile } from "./lyric/load";
@@ -144,15 +143,12 @@ export default function App() {
       setMetaDefault(derived);
       setMetaInput(derived);
       stage.setMeta(resolveMeta(derived, derived));
-      stage.setDuration(loaded.durationSec * 1000);
+      stage.setDuration(loaded.source.durationSec * 1000);
 
-      let admMeta: AdmMetadata | null = null;
-      // ponytail: ADM 时二次读字节（decodeAudioFile 已读过一次）；只对 BWF 生效，
-      // 后续可让 decodeAudioFile 顺带回传 raw
-      if (loaded.isAdm) admMeta = parseAdmBwf(await file.arrayBuffer());
+      const admMeta: AdmMetadata | null = loaded.source.isAdm ? loaded.adm : null;
       stage.setAdm(admMeta);
 
-      setSource(loaded);
+      setSource(loaded.source);
       setAdm(admMeta);
       syncStage(0);
     } catch (e) {

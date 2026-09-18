@@ -1,22 +1,27 @@
 // 原生 PCM/float WAV(C) 解码：ADM BWF 多为 10/12 声道 24-bit 未压缩 PCM，
-// 浏览器 decodeAudioData 会拒绝，故自行解成 Float32。
+// 浏览器 decodeAudioData 会拒绝。这里分两步避免一次性物化全部样本：
+// readWavInfo 只读元数据，decodeWavToStereo 单遍解码+降混直写调用方的立体声数组。
 // 复用 ../adm/parse 的容器遍历（含 RF64/BW64 ds64 覆盖），不重复实现。
 import { walkRiffChunks } from "../adm/parse";
 
-export interface WavPcm {
+export interface WavInfo {
   channelCount: number;
   sampleRate: number;
   frameCount: number;
-  /** 交织 float 采样，范围 [-1, 1]，长度 = frameCount * channelCount */
-  samples: Float32Array;
+  /** 第一个样本帧的绝对字节偏移 */
+  dataOffset: number;
+  blockAlign: number;
+  bitsPerSample: number;
+  validBits: number;
+  isFloat: boolean;
 }
 
 const FORMAT_PCM = 1;
 const FORMAT_FLOAT = 3;
 const FORMAT_EXTENSIBLE = 0xfffe;
 
-/** RIFF/RF64/BW64 WAVE 且为受支持 PCM/float 时返回解析结果，否则 null。 */
-export function parseWavPcm(buffer: ArrayBuffer): WavPcm | null {
+/** RIFF/RF64/BW64 WAVE 且为受支持 PCM/float 时返回元数据，否则 null。不分配样本存储。 */
+export function readWavInfo(buffer: ArrayBuffer): WavInfo | null {
   const walked = walkRiffChunks(buffer);
   if (!walked) return null;
 
@@ -64,7 +69,30 @@ export function parseWavPcm(buffer: ArrayBuffer): WavPcm | null {
   );
   const frameCount = Math.floor(dataBytes / blockAlign);
 
-  const samples = new Float32Array(frameCount * channelCount);
+  return {
+    channelCount,
+    sampleRate,
+    frameCount,
+    dataOffset: dataChunk.offset,
+    blockAlign,
+    bitsPerSample,
+    validBits,
+    isFloat,
+  };
+}
+
+/** 单遍解码 + 平铺平均降混直写调用方立体声数组；仅写 [0, info.frameCount)。 */
+export function decodeWavToStereo(
+  buffer: ArrayBuffer,
+  info: WavInfo,
+  left: Float32Array,
+  right: Float32Array,
+): void {
+  const { dataOffset, blockAlign, channelCount, frameCount } = info;
+  const { bitsPerSample, validBits, isFloat } = info;
+
+  const dv = new DataView(buffer);
+  const bytesPerSample = bitsPerSample / 8;
   const shift = bitsPerSample - validBits;
   const divisor =
     bitsPerSample === 16
@@ -72,14 +100,15 @@ export function parseWavPcm(buffer: ArrayBuffer): WavPcm | null {
       : bitsPerSample === 24
         ? 8388608
         : 2147483648;
+  const invChannels = 1 / channelCount;
 
   for (let f = 0; f < frameCount; f++) {
-    const frameBase = dataChunk.offset + f * blockAlign;
+    const frameBase = dataOffset + f * blockAlign;
+    let sum = 0;
     for (let c = 0; c < channelCount; c++) {
       const p = frameBase + c * bytesPerSample;
-      let out: number;
       if (isFloat) {
-        out = dv.getFloat32(p, true);
+        sum += dv.getFloat32(p, true);
       } else {
         let n: number;
         if (bitsPerSample === 16) {
@@ -95,11 +124,12 @@ export function parseWavPcm(buffer: ArrayBuffer): WavPcm | null {
         }
         // 24-in-32 等：有效位小于容器位时先右移对齐再缩放。
         if (shift > 0) n >>= shift;
-        out = n / divisor;
+        sum += n / divisor;
       }
-      samples[f * channelCount + c] = out;
     }
+    // 多声道 → 立体声：平铺算术平均写左右两声道（与 ./downmix 同规则）。
+    const avg = sum * invChannels;
+    left[f] = avg;
+    right[f] = avg;
   }
-
-  return { channelCount, sampleRate, frameCount, samples };
 }

@@ -1,6 +1,6 @@
 // AudioEngine：歌词 / 视觉的主时钟。
 // 图：AudioBufferSourceNode → GainNode → { ctx.destination(监听), MediaStreamAudioDestinationNode(导出抓流) }
-import type { AudioSource } from "../types";
+import type { AdmMetadata, AudioSource } from "../types";
 import { decodeAudioFile } from "./decode";
 
 export type PlaybackState = "idle" | "playing" | "paused" | "ended";
@@ -47,17 +47,17 @@ export class AudioEngine {
   }
 
   // 可重复调用：先拆掉旧的 source / 状态，再解码新文件
-  async load(file: File): Promise<AudioSource> {
+  async load(file: File): Promise<{ source: AudioSource; adm: AdmMetadata | null }> {
     this.stopSource();
     this.buffer = null;
     this.startOffset = 0;
     this.setState("idle");
 
-    const { source } = await decodeAudioFile(this.ctx, file);
-    this.buffer = source.buffer;
+    const decoded = await decodeAudioFile(this.ctx, file);
+    this.buffer = decoded.source.buffer;
     this.startOffset = 0;
     this.setState("idle");
-    return source;
+    return decoded;
   }
 
   play(): void {
