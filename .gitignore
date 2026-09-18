@@ -6,4 +6,6 @@ dist-ssr
 npm-debug.log*
 *.log
 
+.selfcheck/
+
 .openchamber/

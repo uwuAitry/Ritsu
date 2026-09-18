@@ -23,6 +23,11 @@ jobs:
         with:
           node-version: 20
       - run: npm install
+      - name: Run parser self-checks
+        run: |
+          npx tsc -p tsconfig.selfcheck.json
+          echo '{"type":"commonjs"}' > .selfcheck/package.json
+          node .selfcheck/selfcheck-main.js
       - run: npm run build
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

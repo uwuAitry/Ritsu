@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "outDir": ".selfcheck",
+    "rootDir": "src"
+  },
+  "include": ["src/selfcheck-main.ts"]
+}
