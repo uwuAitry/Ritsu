@@ -5,9 +5,10 @@ import type { AdmMetadata, AdmObject } from "../types";
 
 // ── 容器层 ──────────────────────────────────────────────
 
-interface ChunkInfo {
+export interface RiffChunk {
   id: string;
-  dataOffset: number;
+  /** chunk 数据起始（chunk 头 8 字节之后） */
+  offset: number;
   size: number;
 }
 
@@ -30,60 +31,69 @@ function readU64(dv: DataView, off: number): number {
 }
 
 // 遍历顶层 chunk。RF64/BW64 的 ds64 覆盖表在此应用。
-function readChunks(buffer: ArrayBuffer): ChunkInfo[] {
-  if (buffer.byteLength < 12) throw new Error("adm: buffer too small");
-  const dv = new DataView(buffer);
-  const topId = fourcc(dv, 0);
-  if (topId !== "RIFF" && topId !== "RF64" && topId !== "BW64") {
-    throw new Error("adm: not RIFF/RF64/BW64");
-  }
-  if (fourcc(dv, 8) !== "WAVE") throw new Error("adm: not WAVE");
-
-  const overrides = new Map<string, number>();
-  let dataSizeOverride = -1;
-  const chunks: ChunkInfo[] = [];
-
-  let offset = 12;
-  while (offset + 8 <= buffer.byteLength) {
-    const id = fourcc(dv, offset);
-    if (!CHUNK_ID_RE.test(id)) throw new Error("adm: bad chunk id");
-
-    let size = dv.getUint32(offset + 4, true);
-
-    if (id === "ds64") {
-      // u64 riffSize / u64 dataSize / u64 sampleCount / u32 tableLength / table
-      const base = offset + 8;
-      dataSizeOverride = readU64(dv, base + 8);
-      const tableLength = dv.getUint32(base + 24, true);
-      let p = base + 28;
-      for (let i = 0; i < tableLength; i++) {
-        overrides.set(fourcc(dv, p), readU64(dv, p + 4));
-        p += 12;
-      }
-    }
-
-    if (id === "data" && dataSizeOverride >= 0) size = dataSizeOverride;
-    const ov = overrides.get(id);
-    if (ov !== undefined) size = ov;
-
-    chunks.push({ id, dataOffset: offset + 8, size });
-    // 2 字节对齐：size 为奇数时跳过 1 个 pad 字节（不计入 size）。
-    offset = offset + 8 + size + (size & 1);
-  }
-  return chunks;
-}
-
-export function extractAxmlChunk(buffer: ArrayBuffer): string | null {
+// 非 RIFF/RF64/BW64 + WAVE 或格式非法时返回 null（不抛）。
+export function walkRiffChunks(
+  buffer: ArrayBuffer,
+): { containerId: string; chunks: RiffChunk[] } | null {
   try {
-    const axml = readChunks(buffer).find((c) => c.id === "axml");
-    if (!axml) return null;
-    const end = Math.min(axml.dataOffset + axml.size, buffer.byteLength);
-    const len = Math.max(0, end - axml.dataOffset);
-    const bytes = new Uint8Array(buffer, axml.dataOffset, len);
-    return new TextDecoder("utf-8").decode(bytes);
+    if (buffer.byteLength < 12) return null;
+    const dv = new DataView(buffer);
+    const containerId = fourcc(dv, 0);
+    if (
+      containerId !== "RIFF" &&
+      containerId !== "RF64" &&
+      containerId !== "BW64"
+    ) {
+      return null;
+    }
+    if (fourcc(dv, 8) !== "WAVE") return null;
+
+    const overrides = new Map<string, number>();
+    let dataSizeOverride = -1;
+    const chunks: RiffChunk[] = [];
+
+    let offset = 12;
+    while (offset + 8 <= buffer.byteLength) {
+      const id = fourcc(dv, offset);
+      if (!CHUNK_ID_RE.test(id)) return null;
+
+      let size = dv.getUint32(offset + 4, true);
+
+      if (id === "ds64") {
+        // u64 riffSize / u64 dataSize / u64 sampleCount / u32 tableLength / table
+        const base = offset + 8;
+        dataSizeOverride = readU64(dv, base + 8);
+        const tableLength = dv.getUint32(base + 24, true);
+        let p = base + 28;
+        for (let i = 0; i < tableLength; i++) {
+          overrides.set(fourcc(dv, p), readU64(dv, p + 4));
+          p += 12;
+        }
+      }
+
+      if (id === "data" && dataSizeOverride >= 0) size = dataSizeOverride;
+      const ov = overrides.get(id);
+      if (ov !== undefined) size = ov;
+
+      chunks.push({ id, offset: offset + 8, size });
+      // 2 字节对齐：size 为奇数时跳过 1 个 pad 字节（不计入 size）。
+      offset = offset + 8 + size + (size & 1);
+    }
+    return { containerId, chunks };
   } catch {
     return null;
   }
+}
+
+export function extractAxmlChunk(buffer: ArrayBuffer): string | null {
+  const walked = walkRiffChunks(buffer);
+  if (!walked) return null;
+  const axml = walked.chunks.find((c) => c.id === "axml");
+  if (!axml) return null;
+  const end = Math.min(axml.offset + axml.size, buffer.byteLength);
+  const len = Math.max(0, end - axml.offset);
+  const bytes = new Uint8Array(buffer, axml.offset, len);
+  return new TextDecoder("utf-8").decode(bytes);
 }
 
 export function isAdmBwf(buffer: ArrayBuffer): boolean {
