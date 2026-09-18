@@ -1,6 +1,7 @@
 // 原生 PCM/float WAV(C) 解码：ADM BWF 多为 10/12 声道 24-bit 未压缩 PCM，
 // 浏览器 decodeAudioData 会拒绝。这里分两步避免一次性物化全部样本：
-// readWavInfo 只读元数据，decodeWavToStereo 单遍解码+降混直写调用方的立体声数组。
+// readWavInfo 只读元数据（含 dwChannelMask），decodeWavToStereo 单遍解码 +
+// 声道角色感知降混直写调用方立体声数组，必要时整体限峰。
 // 复用 ../adm/parse 的容器遍历（含 RF64/BW64 ds64 覆盖），不重复实现。
 import { walkRiffChunks } from "../adm/parse";
 
@@ -14,6 +15,8 @@ export interface WavInfo {
   bitsPerSample: number;
   validBits: number;
   isFloat: boolean;
+  /** dwChannelMask（WAVE_FORMAT_EXTENSIBLE）；0 = 未知/非 extensible。 */
+  channelMask: number;
 }
 
 const FORMAT_PCM = 1;
@@ -39,6 +42,7 @@ export function readWavInfo(buffer: ArrayBuffer): WavInfo | null {
   const blockAlign = dv.getUint16(fmtChunk.offset + 12, true);
   const bitsPerSample = dv.getUint16(fmtChunk.offset + 14, true);
   let validBits = bitsPerSample;
+  let channelMask = 0;
 
   if (audioFormat === FORMAT_EXTENSIBLE) {
     // cbSize(u16) / validBits(u16) / channelMask(u32) / SubFormat GUID(16B)
@@ -47,6 +51,7 @@ export function readWavInfo(buffer: ArrayBuffer): WavInfo | null {
     if (cbSize < 22) return null;
     const v = dv.getUint16(fmtChunk.offset + 18, true);
     validBits = v > 0 && v <= bitsPerSample ? v : bitsPerSample;
+    channelMask = dv.getUint32(fmtChunk.offset + 20, true);
     // GUID 首 4 字节小端即真实 format code；取前 2 字节足够。
     audioFormat = dv.getUint16(fmtChunk.offset + 24, true);
   }
@@ -78,18 +83,104 @@ export function readWavInfo(buffer: ArrayBuffer): WavInfo | null {
     bitsPerSample,
     validBits,
     isFloat,
+    channelMask,
   };
 }
 
-/** 单遍解码 + 平铺平均降混直写调用方立体声数组；仅写 [0, info.frameCount)。 */
+// ── 声道角色 → 立体声增益（ITU-R BS.775 Lo/Ro 系数） ──────────────
+
+const S = 0.7071067811865476;
+
+type RoleGain = readonly [gainL: number, gainR: number];
+
+// ksmedia SPEAKER_* 位 → (L, R) 增益；按位升序遍历即 WAVE 交织声道顺序。
+const ROLE_BY_BIT = new Map<number, RoleGain>([
+  [0x1, [1.0, 0]], // FrontLeft
+  [0x2, [0, 1.0]], // FrontRight
+  [0x4, [S, S]], // FrontCenter
+  [0x8, [0, 0]], // LFE：直接丢弃
+  [0x10, [S, 0]], // BackLeft / RearLeft
+  [0x20, [0, S]], // BackRight / RearRight
+  [0x40, [S, 0]], // FrontLeftCenter
+  [0x80, [0, S]], // FrontRightCenter
+  [0x100, [S, S]], // BackCenter
+  [0x200, [S, 0]], // SideLeft
+  [0x400, [0, S]], // SideRight
+  [0x800, [S, S]], // TopCenter
+  [0x1000, [S, 0]], // TopFrontLeft
+  [0x2000, [S, S]], // TopFrontCenter
+  [0x4000, [0, S]], // TopFrontRight
+  [0x8000, [S, 0]], // TopBackLeft
+  [0x10000, [S, S]], // TopBackCenter
+  [0x20000, [0, S]], // TopBackRight
+]);
+const UNKNOWN_GAIN: RoleGain = [S, S];
+
+// 无掩码时按声道数定位（旧 WAVE 位置约定）。单声道不走此表，见 decodeWavToStereo。
+const LADDER_MASK = new Map<number, number>([
+  [2, 0x3], // L R
+  [3, 0x7], // L R C
+  [4, 0x603], // L R SL SR
+  [5, 0x607], // L R C SL SR
+  [6, 0x60f], // L R C LFE SL SR
+  [7, 0x637], // L R C RL RR SL SR
+  [8, 0x63f], // L R C LFE RL RR SL SR
+]);
+
+// 掩码位升序 → 第 n 个置位对应声道 n；位不足的余下声道无角色，走 S/S。
+function assignChannelGains(
+  mask: number,
+  channelCount: number,
+  gainL: Float32Array,
+  gainR: Float32Array,
+): void {
+  let remaining = mask >>> 0;
+  let ch = 0;
+  while (remaining !== 0 && ch < channelCount) {
+    const bit = remaining & -remaining;
+    remaining ^= bit;
+    const g = ROLE_BY_BIT.get(bit) ?? UNKNOWN_GAIN;
+    gainL[ch] = g[0];
+    gainR[ch] = g[1];
+    ch++;
+  }
+  for (; ch < channelCount; ch++) {
+    gainL[ch] = S;
+    gainR[ch] = S;
+  }
+}
+
+/** 单遍解码 + 声道角色降混直写调用方立体声数组；仅写 [0, info.frameCount)。 */
 export function decodeWavToStereo(
   buffer: ArrayBuffer,
   info: WavInfo,
   left: Float32Array,
   right: Float32Array,
 ): void {
-  const { dataOffset, blockAlign, channelCount, frameCount } = info;
+  const { dataOffset, blockAlign, channelCount, frameCount, channelMask } = info;
   const { bitsPerSample, validBits, isFloat } = info;
+
+  // 每声道增益表只建一次，绝不放帧循环里。
+  const gainL = new Float32Array(channelCount);
+  const gainR = new Float32Array(channelCount);
+  if (channelCount === 1) {
+    // 单声道等功率直出双声道：不做 C 的 -3dB，否则同一内容比立体声低 3dB。
+    gainL.fill(1);
+    gainR.fill(1);
+  } else if (channelMask !== 0) {
+    assignChannelGains(channelMask, channelCount, gainL, gainR);
+  } else {
+    const ladder = LADDER_MASK.get(channelCount);
+    if (ladder !== undefined) {
+      assignChannelGains(ladder, channelCount, gainL, gainR);
+    } else {
+      // >8 且无掩码：仅凭声道数无法区分 5.1.4 / 7.1.2，退回平铺平均。
+      // ponytail: 升级路径 = 解析 ADM chna chunk（track index → channel mask），Cavern 即此法。
+      const flat = 1 / channelCount;
+      gainL.fill(flat);
+      gainR.fill(flat);
+    }
+  }
 
   const dv = new DataView(buffer);
   const bytesPerSample = bitsPerSample / 8;
@@ -100,15 +191,16 @@ export function decodeWavToStereo(
       : bitsPerSample === 24
         ? 8388608
         : 2147483648;
-  const invChannels = 1 / channelCount;
 
   for (let f = 0; f < frameCount; f++) {
     const frameBase = dataOffset + f * blockAlign;
-    let sum = 0;
+    let sumL = 0;
+    let sumR = 0;
     for (let c = 0; c < channelCount; c++) {
       const p = frameBase + c * bytesPerSample;
+      let s: number;
       if (isFloat) {
-        sum += dv.getFloat32(p, true);
+        s = dv.getFloat32(p, true);
       } else {
         let n: number;
         if (bitsPerSample === 16) {
@@ -124,12 +216,31 @@ export function decodeWavToStereo(
         }
         // 24-in-32 等：有效位小于容器位时先右移对齐再缩放。
         if (shift > 0) n >>= shift;
-        sum += n / divisor;
+        s = n / divisor;
       }
+      sumL += s * gainL[c];
+      sumR += s * gainR[c];
     }
-    // 多声道 → 立体声：平铺算术平均写左右两声道（与 ./downmix 同规则）。
-    const avg = sum * invChannels;
-    left[f] = avg;
-    right[f] = avg;
+    left[f] = sumL;
+    right[f] = sumR;
+  }
+
+  // 0.7071 系数下多声道可叠加超过 1.0，硬削波会毁掉导出画面 → 整体限峰。
+  // ponytail: 单一全局系数而非分块限制器，一处瞬态会压低全曲。
+  // 升级路径 = Cavern 式逐块峰值限制器（~240 样本块，~0.9 天花板，上行缓慢恢复）。
+  let peak = 0;
+  for (let f = 0; f < frameCount; f++) {
+    const al = Math.abs(left[f]);
+    const ar = Math.abs(right[f]);
+    if (al > peak) peak = al;
+    if (ar > peak) peak = ar;
+  }
+  if (peak > 0.99) {
+    // 左右共用同一系数，保持立体声像。
+    const k = 0.99 / peak;
+    for (let f = 0; f < frameCount; f++) {
+      left[f] *= k;
+      right[f] *= k;
+    }
   }
 }
