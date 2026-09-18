@@ -1,7 +1,10 @@
 import type { LyricLine } from "@applemusic-like-lyrics/core";
 
-// 单行歌词渲染：左下角锚定、逐词渐进填充。
+// 单行歌词渲染：左下角锚定。
 // 自定义布局，不使用 AMLL 的多行播放器组件；只画一行，调用方负责选行与动画进度。
+// 填充规则：仅当一行真有多个已计时词（>1 个有效 box）时才逐词渐进填充；
+// 单词语句（如 LRC 的 parseLrc 每行只产出一个词）整行保持基色，不做左到右擦除。
+// 调用方可用 options.wordByWord 显式开关：false 强制关闭，true 在有可用渐变时启用，未传则自动。
 
 type LyricWord = LyricLine["words"][number];
 
@@ -79,6 +82,7 @@ export function drawLyricLine(
   timeMs: number,
   layout: LyricLayout,
   anim: { progress: number },
+  options?: { wordByWord?: boolean },
 ): void {
   if (!line) return;
 
@@ -101,6 +105,10 @@ export function drawLyricLine(
   ctx.font = `bold ${finalSize}px ${FONT_FAMILY}`;
   const { boxes } = layoutWords(ctx, words, layout.x);
 
+  // 逐词填充开关：显式 options 优先，否则仅在多词行自动启用。
+  const perWord = boxes.length > 1;
+  const progressive = options?.wordByWord ?? perWord;
+
   // 行末 250ms 淡出。
   // ponytail: drawLyricLine 只拿到单行，无法判断“是否最后一行”；用 endTime === Infinity 近似
   // （Infinity 时该判断自然为 false，不淡出）。需要精确区分时由调用方在外部再压一层 alpha。
@@ -114,6 +122,13 @@ export function drawLyricLine(
   ctx.shadowOffsetY = 2;
 
   for (const box of boxes) {
+    // 非逐词模式：整行始终基色，跳过渐变路径（无暗底、无 createLinearGradient）。
+    if (!progressive) {
+      ctx.fillStyle = baseColor;
+      ctx.fillText(box.text, box.x, baseline);
+      continue;
+    }
+
     const word = box.word;
     const dur = word.endTime - word.startTime;
     // 零长 / 非数时长 → 视为已唱完，避免除零

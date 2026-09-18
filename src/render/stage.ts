@@ -18,11 +18,33 @@ const FONT_STACK = "system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC', sans-s
 const TITLE_FONT = `bold 34px ${FONT_STACK}`;
 const ARTIST_FONT = `22px ${FONT_STACK}`;
 const TIME_FONT = `18px ${FONT_STACK}`;
-const LABEL_FONT = `16px ${FONT_STACK}`;
 const EMPTY_FONT = `18px ${FONT_STACK}`;
 
 const BADGE_TEXT = "DOLBY ATMOS";
 const BADGE_GAP = 2; // 手动字距（px）
+
+// ---- 构图常量（1920×1080）----
+// 封面：水平正中 670–1250，上缘 100 / 下缘 680。
+// 顶部留白 100 ≈ 封面下缘到歌词字顶（784）的 104，阴影尾巴不会压到歌词。
+const COVER_SIZE = 580;
+const COVER_X = (W - COVER_SIZE) / 2;
+const COVER_Y = 100;
+const COVER_RADIUS = 28;
+
+// 空间视图离屏尺寸：与舞台同为 16:9，满幅放大无变形
+const ATMOS_W = 1280;
+const ATMOS_H = 720;
+
+// 无 ADM 时的静默提示：顶部正中，避开封面与信息条
+const EMPTY_TEXT = "未检测到 ADM 空间音频";
+const EMPTY_Y = 62;
+
+// 唯一 Dolby Atmos 徽标：信息条右端，与标题/歌手块同高（右侧留白，不压进度条）
+const BADGE_URL =
+  "https://d21buns5ku92am.cloudfront.net/68644/images/413934-Dolby%20Atmos%20Horizontal-015e44-large-1641853769.png";
+const BADGE_W = 220;
+const BADGE_RIGHT_X = 1810;
+const BADGE_MID_Y = 886;
 
 // 歌词入场动画时长：基于 timeMs，导出/预览同帧同结果
 const LYRIC_ANIM_MS = 250;
@@ -70,7 +92,10 @@ export class StageRenderer {
   // 静态资源缓存（跨帧复用）
   private readonly darkGradient: CanvasGradient;
   private readonly badgeMetrics = new Map<string, { widths: number[]; total: number }>();
-  private titleWidth = 0;
+
+  // 远程徽标：只加载一次；badgeArt 非空即就绪，为空（加载中/失败）时走矢量兜底
+  private readonly badgeImg: HTMLImageElement;
+  private badgeArt: HTMLCanvasElement | null = null;
 
   // 懒解析的圆角矩形路径能力
   private roundRectFn: RoundRectFn | null = null;
@@ -88,11 +113,19 @@ export class StageRenderer {
     this.bgCanvas.width = W;
     this.bgCanvas.height = H;
 
-    this.atmos = new AtmosRenderer(640, 520);
+    this.atmos = new AtmosRenderer(ATMOS_W, ATMOS_H);
 
     this.darkGradient = ctx.createLinearGradient(0, 0, 0, H);
     this.darkGradient.addColorStop(0, "#1a1a1f");
     this.darkGradient.addColorStop(1, "#0a0a0d");
+
+    // 徽标：构造时发起一次（非阻塞，首帧不等它）。
+    // crossOrigin 必带：CDN 返回 Access-Control-Allow-Origin: *，canvas 不被污染，captureStream 导出可用。
+    const badge = new Image();
+    badge.crossOrigin = "anonymous";
+    badge.onload = () => this.bakeBadge(badge);
+    badge.src = BADGE_URL;
+    this.badgeImg = badge;
   }
 
   setCover(img: CoverSource | null): void {
@@ -111,12 +144,6 @@ export class StageRenderer {
   setMeta(meta: StageMeta): void {
     this.title = meta.title ?? "";
     this.artist = meta.artist ?? "";
-    // 标题宽度只随标题变化：缓存，供徽标定位复用
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.font = TITLE_FONT;
-    this.titleWidth = ctx.measureText(this.title).width;
-    ctx.restore();
   }
 
   setTime(currentTimeMs: number): void {
@@ -137,7 +164,10 @@ export class StageRenderer {
     const ctx = this.ctx;
     const timeMs = this.timeMs;
 
+    // 背景栈：流体/模糊底 → 满幅空间房间 → 统一压暗的 scrim
+    // （房间压在 scrim 之下，让底部歌词/信息条始终有对比度，同时仍有环绕感）
     this.drawBackground(ctx);
+    this.drawAtmosView(ctx);
     ctx.fillStyle = "rgba(0,0,0,0.28)";
     ctx.fillRect(0, 0, W, H);
 
@@ -157,14 +187,8 @@ export class StageRenderer {
       { progress },
     );
 
-    this.drawAtmosPanel(ctx);
-
-    // 5a 封面下
-    this.drawAtmosBadge(ctx, 110, 580, "left");
-    // 5b 标题块右侧（小号，视觉中心对齐标题基线）
-    this.drawAtmosBadge(ctx, 110 + this.titleWidth + 18, 884, "left", 12);
-    // 5c 进度条下（右对齐，让开右下角总时长文本）
-    this.drawAtmosBadge(ctx, 1700, 1008, "right");
+    // 唯一徽标
+    this.drawBadge(ctx);
 
     this.drawInfoBar(ctx);
   }
@@ -175,6 +199,8 @@ export class StageRenderer {
     this.lines = [];
     this.adm = null;
     this.bgEl = null;
+    // 卸载后图片才到货时不重绘（atmos 上下文已释放）；加载失败则一直走矢量兜底
+    this.badgeImg.onload = null;
   }
 
   // ---- 绘制分块 ----
@@ -201,10 +227,10 @@ export class StageRenderer {
   }
 
   private drawCover(ctx: CanvasRenderingContext2D): void {
-    const x = 110;
-    const y = 210;
-    const size = 340;
-    const radius = 24;
+    const x = COVER_X;
+    const y = COVER_Y;
+    const size = COVER_SIZE;
+    const radius = COVER_RADIUS;
     const cover = this.cover;
     const ready = cover !== null && this.coverReady(cover);
 
@@ -233,44 +259,51 @@ export class StageRenderer {
     ctx.restore();
   }
 
-  private drawAtmosPanel(ctx: CanvasRenderingContext2D): void {
-    const x = 1120;
-    const y = 250;
-    const w = 680;
-    const h = 560;
-    const radius = 20;
-
-    ctx.save();
-    ctx.beginPath();
-    this.roundRectPath(x, y, w, h, radius);
-    ctx.fillStyle = "rgba(255,255,255,0.05)";
-    ctx.fill();
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = "rgba(255,255,255,0.12)";
-    ctx.stroke();
-
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
-    ctx.fillStyle = "rgba(255,255,255,0.65)";
-    ctx.font = LABEL_FONT;
-    ctx.fillText("Dolby Atmos 空间摆位", 1140, 285);
-
-    if (this.adm) {
-      ctx.beginPath();
-      this.roundRectPath(x, y, w, h, radius);
-      ctx.clip();
-      this.atmos.render();
-      ctx.drawImage(this.atmos.canvas, 1140, 310, 640, 520);
-    } else {
-      ctx.fillStyle = "rgba(255,255,255,0.35)";
+  // 空间视图：无面板、无描边、无标签，整帧铺满（离屏 1280×720 → 1920×1080，同为 16:9 无变形）。
+  // 离屏画布透明底，舞台背景自然透出。
+  // ponytail: 居中封面会遮住房间正中那批对象（前方 ±45° 内的点）。
+  // 若将来摆位精度比封面锚点更重要，再给被遮挡对象加引线或改用侧栏小图。
+  private drawAtmosView(ctx: CanvasRenderingContext2D): void {
+    if (!this.adm) {
+      // 空状态：纯文字、无底框；位于顶部正中，避开封面与信息条
+      ctx.save();
+      ctx.fillStyle = "rgba(255,255,255,0.42)";
       ctx.font = EMPTY_FONT;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText("未检测到 ADM 空间音频", x + w / 2, y + h / 2);
+      ctx.fillText(EMPTY_TEXT, W / 2, EMPTY_Y);
+      ctx.restore();
+      return;
     }
-    ctx.restore();
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
+    this.atmos.render();
+    ctx.drawImage(this.atmos.canvas, 0, 0, W, H);
+  }
+
+  // 唯一徽标：远程 PNG，按原始比例绘制；未就绪/失败时回退矢量文字，帧永不空缺
+  private drawBadge(ctx: CanvasRenderingContext2D): void {
+    const art = this.badgeArt;
+    if (art) {
+      const h = BADGE_W * (art.height / art.width); // 665×95 → ≈31px
+      ctx.drawImage(art, BADGE_RIGHT_X - BADGE_W, BADGE_MID_Y - h / 2, BADGE_W, h);
+      return;
+    }
+    this.drawAtmosBadge(ctx, BADGE_RIGHT_X, BADGE_MID_Y + 5);
+  }
+
+  // 远程 PNG 是纯黑字形 + 透明底（浅色背景版本），直接画在暗舞台上等于隐形：
+  // 就绪后一次性烘焙成白色剪影（source-in 只保留 alpha），原始字形与比例不变。
+  private bakeBadge(img: HTMLImageElement): void {
+    const art = document.createElement("canvas");
+    art.width = img.naturalWidth;
+    art.height = img.naturalHeight;
+    const g = art.getContext("2d");
+    if (!g || art.width === 0 || art.height === 0) return; // 保持矢量兜底
+    g.drawImage(img, 0, 0);
+    g.globalCompositeOperation = "source-in";
+    g.fillStyle = "#ffffff";
+    g.fillRect(0, 0, art.width, art.height);
+    this.badgeArt = art;
+    this.render(); // 就绪后立即重绘，不必等下一次状态变化
   }
 
   private drawInfoBar(ctx: CanvasRenderingContext2D): void {
@@ -309,21 +342,15 @@ export class StageRenderer {
     ctx.textAlign = "left";
   }
 
-  // letterspaced "DOLBY ATMOS"（可选双 D 标记）。align 决定 x 是左缘还是右缘。
-  private drawAtmosBadge(
-    ctx: CanvasRenderingContext2D,
-    x: number,
-    y: number,
-    align: "left" | "right",
-    size = 14,
-  ): void {
+  // 矢量兜底：右对齐的 letterspaced "DOLBY ATMOS" + 双 D 标记（远程 PNG 不可用时使用）
+  private drawAtmosBadge(ctx: CanvasRenderingContext2D, right: number, y: number, size = 14): void {
     const font = `bold ${size}px ${FONT_STACK}`;
     const metrics = this.measureBadge(ctx, font);
     const markH = size * 0.72;
     const markW = markH * 2;
     const markGap = size * 0.5;
     const totalW = markW + markGap + metrics.total;
-    const startX = align === "right" ? x - totalW : x;
+    const startX = right - totalW;
 
     ctx.save();
     ctx.font = font;

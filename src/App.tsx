@@ -11,6 +11,7 @@ import { AudioEngine } from "./audio/engine";
 import { exportVideo, pickMimeType } from "./export/recorder";
 import { loadLyricFile } from "./lyric/load";
 import { StageRenderer } from "./render/stage";
+import type { StageMeta } from "./render/stage";
 import type { AdmMetadata, AudioSource } from "./types";
 
 const AUDIO_ACCEPT = "audio/*,.wav,.bwf,.rf64,.flac,.mp3,.m4a,.aac,.ogg";
@@ -38,6 +39,17 @@ function splitFileName(fileName: string): { title: string; artist: string } {
   return { title: base, artist: "" };
 }
 
+// 空输入的兜底文案（同时用作输入框 placeholder）
+const META_PLACEHOLDER = { title: "未知曲目", artist: "未知歌手" };
+
+// 用户输入优先，空则回退文件名推导值，再回退兜底文案：舞台上不留空白标题行
+function resolveMeta(input: StageMeta, fallback: StageMeta): StageMeta {
+  return {
+    title: input.title.trim() || fallback.title || META_PLACEHOLDER.title,
+    artist: input.artist.trim() || fallback.artist || META_PLACEHOLDER.artist,
+  };
+}
+
 function errText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -60,6 +72,9 @@ export default function App() {
   const [exportProgress, setExportProgress] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // 歌曲信息：metaInput 是输入框原值（可为空串），metaDefault 是文件名推导值
+  const [metaInput, setMetaInput] = useState<StageMeta>({ title: "", artist: "" });
+  const [metaDefault, setMetaDefault] = useState<StageMeta>({ title: "", artist: "" });
 
   // 引擎 / 舞台在挂载时创建、卸载时销毁。StrictMode 的模拟卸载走同一条清理路径，
   // 重新挂载即重建 —— 不在 render 里 new，避免被双调用泄漏 AudioContext / WebGL context。
@@ -124,8 +139,11 @@ export default function App() {
     try {
       // engine.load 内部就是 decodeAudioFile，并把解码缓冲交给引擎（避免重复解码）
       const loaded = await engine.load(file);
-      const { title, artist } = splitFileName(file.name);
-      stage.setMeta({ title, artist });
+      // 文件名 → 默认歌曲信息：输入框预填，舞台同步（空歌手回退兜底文案）
+      const derived: StageMeta = splitFileName(file.name);
+      setMetaDefault(derived);
+      setMetaInput(derived);
+      stage.setMeta(resolveMeta(derived, derived));
       stage.setDuration(loaded.durationSec * 1000);
 
       let admMeta: AdmMetadata | null = null;
@@ -146,6 +164,16 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  };
+
+  // 改一个字就立刻同步舞台：暂停时没有 tick，必须手动补一帧
+  const updateMeta = (patch: Partial<StageMeta>): void => {
+    const next = { ...metaInput, ...patch };
+    setMetaInput(next);
+    const stage = stageRef.current;
+    if (!stage) return;
+    stage.setMeta(resolveMeta(next, metaDefault));
+    stage.render();
   };
 
   const handleLyric = async (file: File): Promise<void> => {
@@ -319,6 +347,34 @@ export default function App() {
               </span>
               <span className="file-note">建议 1:1 方图，PNG / JPG</span>
             </label>
+          </section>
+
+          <section className="panel-block">
+            <h2 className="block-title">歌曲信息</h2>
+            <div className="meta-row">
+              <label className="file-field">
+                <span className="file-label">标题</span>
+                <input
+                  className="text-input"
+                  type="text"
+                  value={metaInput.title}
+                  placeholder={metaDefault.title || META_PLACEHOLDER.title}
+                  disabled={locked}
+                  onChange={(e) => updateMeta({ title: e.target.value })}
+                />
+              </label>
+              <label className="file-field">
+                <span className="file-label">歌手</span>
+                <input
+                  className="text-input"
+                  type="text"
+                  value={metaInput.artist}
+                  placeholder={metaDefault.artist || META_PLACEHOLDER.artist}
+                  disabled={locked}
+                  onChange={(e) => updateMeta({ artist: e.target.value })}
+                />
+              </label>
+            </div>
           </section>
 
           <section className="panel-block">

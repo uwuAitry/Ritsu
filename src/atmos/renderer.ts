@@ -6,11 +6,11 @@ import type { AdmObject } from "../types";
 
 // 单位球半径 = ADM 距离 1；对象小球半径（世界单位）
 const OBJECT_RADIUS = 0.05;
-// 需完整入镜的包围球半径（单位球 + 光晕余量）
-const FIT_RADIUS = 1.25;
+// 取景包围球半径（小于单位球：让对象填满画面）
+const FIT_RADIUS = 0.95;
 // 相机方向：原点后方偏上。ADM 前方映射到屏幕内，形成“玻璃后的房间”透视
-const CAMERA_DIR = new THREE.Vector3(0, 1.6, 3.2).normalize();
-const CAMERA_TARGET = new THREE.Vector3(0, 0.05, 0);
+const CAMERA_DIR = new THREE.Vector3(0, 0.42, 0.91).normalize();
+const CAMERA_TARGET = new THREE.Vector3(0, 0, 0);
 const LINE_COLOR = 0x8fa6c0;
 
 type ObjectNode = {
@@ -71,7 +71,7 @@ export class AtmosRenderer {
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.setSize(width, height, false);
 
-    this.camera = new THREE.PerspectiveCamera(40, 1, 0.1, 50);
+    this.camera = new THREE.PerspectiveCamera(52, 1, 0.1, 50);
     this.sphereGeometry = new THREE.SphereGeometry(OBJECT_RADIUS, 16, 12);
     this.glowTexture = makeGlowTexture();
 
@@ -172,8 +172,8 @@ export class AtmosRenderer {
   private buildReferenceFrame(): THREE.Object3D {
     const frame = new THREE.Group();
 
-    const grid = new THREE.PolarGridHelper(1, 8, 4, 64, LINE_COLOR, LINE_COLOR);
-    setFaint(grid.material, 0.16);
+    const grid = new THREE.PolarGridHelper(1.7, 8, 4, 64, LINE_COLOR, LINE_COLOR);
+    setFaint(grid.material, 0.08);
     frame.add(grid);
 
     const meridian: THREE.Vector3[] = [];
@@ -184,7 +184,7 @@ export class AtmosRenderer {
     frame.add(
       new THREE.LineLoop(
         new THREE.BufferGeometry().setFromPoints(meridian),
-        new THREE.LineBasicMaterial({ color: LINE_COLOR, transparent: true, opacity: 0.16, depthWrite: false }),
+        new THREE.LineBasicMaterial({ color: LINE_COLOR, transparent: true, opacity: 0.08, depthWrite: false }),
       ),
     );
 
@@ -198,13 +198,13 @@ export class AtmosRenderer {
         origin,
         new THREE.Vector3(0, 1, 0), // ADM +z = 上
       ]),
-      new THREE.LineBasicMaterial({ color: 0xb6c6dc, transparent: true, opacity: 0.35, depthWrite: false }),
+      new THREE.LineBasicMaterial({ color: 0xb6c6dc, transparent: true, opacity: 0.18, depthWrite: false }),
     );
     frame.add(axes);
 
     const listener = new THREE.Mesh(
       new THREE.SphereGeometry(0.03, 12, 8),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, depthWrite: false }),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.25, depthWrite: false }),
     );
     frame.add(listener);
 
