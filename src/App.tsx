@@ -271,6 +271,8 @@ export default function App() {
   const seekValue = Math.min(Math.max(timeMs, 0), seekMax);
   const progressPct = durationMs > 0 ? Math.min(100, (timeMs / durationMs) * 100) : 0;
   const locked = busy || exporting;
+  // 只在完全空白时盖住舞台：只有歌词或只有封面时仍显示既有画面
+  const stageEmpty = !source && lines.length === 0 && !coverUrl;
 
   return (
     <div className="app">
@@ -296,12 +298,20 @@ export default function App() {
           <section className="panel-block">
             <h2 className="block-title">素材</h2>
 
-            <label className="file-field">
-              <span className="file-label">音频文件</span>
+            <label className="file-field file-field--audio">
+              <span className="file-label" id="audio-file-label">
+                <span className="field-icon" aria-hidden="true">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+                    <path d="M2 7.2v1.6M5.5 4.2v7.6M9 2.2v11.6M12.5 5.2v5.6M15 7.2v1.6" />
+                  </svg>
+                </span>
+                音频文件
+              </span>
               <input
                 type="file"
                 accept={AUDIO_ACCEPT}
                 disabled={locked}
+                aria-labelledby="audio-file-label"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   e.target.value = "";
@@ -311,12 +321,20 @@ export default function App() {
               <span className="file-note">WAV · BWF · RF64 · FLAC · MP3 · M4A</span>
             </label>
 
-            <label className="file-field">
-              <span className="file-label">歌词文件</span>
+            <label className="file-field file-field--lyric">
+              <span className="file-label" id="lyric-file-label">
+                <span className="field-icon" aria-hidden="true">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+                    <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h6.5" />
+                  </svg>
+                </span>
+                歌词文件
+              </span>
               <input
                 type="file"
                 accept={LYRIC_ACCEPT}
                 disabled={locked}
+                aria-labelledby="lyric-file-label"
                 onChange={(e) => {
                   const file = e.target.files?.[0];
                   e.target.value = "";
@@ -326,14 +344,24 @@ export default function App() {
               <span className="file-note">LRC · YRC · QRC · Lyricify · TTML</span>
             </label>
 
-            <label className="file-field">
-              <span className="file-label">封面图片</span>
+            <label className="file-field file-field--cover">
+              <span className="file-label" id="cover-file-label">
+                <span className="field-icon" aria-hidden="true">
+                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="2.5" y="3" width="11" height="10" rx="2.5" />
+                    <circle cx="6" cy="6.6" r="1.1" />
+                    <path d="M3.2 11.8 6.4 9l2.3 1.9L11 8.2l2 2.2" />
+                  </svg>
+                </span>
+                封面图片
+              </span>
               <span className="cover-row">
                 {coverUrl ? <img className="cover-thumb" src={coverUrl} alt="封面预览" /> : null}
                 <input
                   type="file"
                   accept={COVER_ACCEPT}
                   disabled={locked}
+                  aria-labelledby="cover-file-label"
                   onChange={(e) => {
                     const file = e.target.files?.[0];
                     e.target.value = "";
@@ -348,9 +376,10 @@ export default function App() {
           <section className="panel-block">
             <h2 className="block-title">歌曲信息</h2>
             <div className="meta-row">
-              <label className="file-field">
+              <label className="file-field" htmlFor="meta-title">
                 <span className="file-label">标题</span>
                 <input
+                  id="meta-title"
                   className="text-input"
                   type="text"
                   value={metaInput.title}
@@ -359,9 +388,10 @@ export default function App() {
                   onChange={(e) => updateMeta({ title: e.target.value })}
                 />
               </label>
-              <label className="file-field">
+              <label className="file-field" htmlFor="meta-artist">
                 <span className="file-label">歌手</span>
                 <input
+                  id="meta-artist"
                   className="text-input"
                   type="text"
                   value={metaInput.artist}
@@ -449,7 +479,20 @@ export default function App() {
             <span>预览 · 1920 × 1080</span>
             <span>{playing ? "播放中" : source ? "已暂停" : "未载入音频"}</span>
           </div>
-          <div className="stage-frame" ref={stageHostRef} />
+          <div className="stage-frame" ref={stageHostRef}>
+            {stageEmpty ? (
+              <div className="stage-empty" aria-hidden="true">
+                <div className="stage-empty-mark">
+                  <span />
+                  <span />
+                  <span />
+                  <span />
+                  <span />
+                </div>
+                <p className="stage-empty-text">等待载入素材</p>
+              </div>
+            ) : null}
+          </div>
         </section>
       </main>
     </div>

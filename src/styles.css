@@ -7,13 +7,29 @@
 
   --bg: #07070b;
   --text: #f5f5f7;
-  --dim: rgba(245, 245, 247, 0.58);
-  --faint: rgba(245, 245, 247, 0.36);
+  /* 文字明度阶梯：次级 / 三级在卡片底色上均达到 WCAG AA。
+     卡片是玻璃叠在紫色光晕上，实测底色随机位在 #2a1f3d ~ #392f60 之间；
+     取最亮端（含顶部高光）核算：dim ≈6.5:1，faint ≈5.2:1 —— 三级层承载全部段落标签与格式提示。 */
+  --dim: rgba(245, 245, 247, 0.72);
+  --faint: rgba(245, 245, 247, 0.6);
   --line: rgba(255, 255, 255, 0.1);
+  --line-soft: rgba(255, 255, 255, 0.07);
   --glass: rgba(255, 255, 255, 0.055);
   --glass-hi: rgba(255, 255, 255, 0.12);
   --accent: #fa2d48;
   --accent-hi: #ff5f7a;
+  --violet: #b39bff;
+  --azure: #7fb4ff;
+
+  /* 字号阶梯：12 / 13 / 14 / 15 / 16.5 / 30 —— 细字 → 段落 → 字段名 → 字标。
+     16.5 补上原先缺失的中段，30 只留给字标。 */
+  --fs-2xs: 12px;
+  --fs-xs: 13px;
+  --fs-sm: 14px;
+  --fs-md: 15px;
+  --fs-lg: 16.5px;
+  --fs-display: 30px;
+
   --radius-lg: 22px;
   --radius-md: 14px;
   --ease: cubic-bezier(0.22, 0.72, 0.2, 1);
@@ -41,8 +57,8 @@ body {
   background-attachment: fixed;
   color: var(--text);
   font-family: var(--font);
-  font-size: 14px;
-  line-height: 1.5;
+  font-size: var(--fs-md);
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
 
@@ -78,9 +94,10 @@ body {
 
 .brand {
   margin: 0;
-  font-size: 22px;
+  font-size: var(--fs-display);
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
+  line-height: 1.08;
   background: linear-gradient(100deg, #ffffff, #ffc2cc 70%, #ff7d92);
   -webkit-background-clip: text;
   background-clip: text;
@@ -89,7 +106,7 @@ body {
 
 .tagline {
   margin: 0;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   color: var(--dim);
 }
 
@@ -108,11 +125,14 @@ body {
   width: 330px;
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
   padding: 22px;
   border-radius: var(--radius-lg);
   border: 1px solid var(--line);
-  background: var(--glass);
+  /* 顶部一道极淡高光，让玻璃卡片在暗底上有厚度（刻意压低，避免顶部的格式提示掉对比度） */
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0) 42%),
+    var(--glass);
   backdrop-filter: blur(26px) saturate(160%);
   -webkit-backdrop-filter: blur(26px) saturate(160%);
   box-shadow:
@@ -128,8 +148,8 @@ body {
 }
 
 .panel-block + .panel-block {
-  padding-top: 18px;
-  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  padding-top: 16px;
+  border-top: 1px solid var(--line-soft);
 }
 
 .panel-block:nth-of-type(2) {
@@ -145,26 +165,82 @@ body {
 }
 
 .block-title {
+  display: flex;
+  align-items: center;
+  gap: 9px;
   margin: 0;
-  font-size: 11px;
+  font-size: var(--fs-xs);
   font-weight: 600;
-  letter-spacing: 0.12em;
-  color: var(--faint);
+  letter-spacing: 0.14em;
+  color: var(--dim);
+}
+
+/* 段落标签前的一小段绯红刻度：给区块一个统一起点，不再只是灰字 */
+.block-title::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 14px;
+  height: 2px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent-hi), var(--accent));
 }
 
 /* 字段容器：素材文件 / 歌曲信息共用同一套标签 + 间距节奏 */
 .file-field {
   display: grid;
-  gap: 7px;
+  gap: 9px;
 }
 
 .file-label {
-  font-size: 13.5px;
-  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  letter-spacing: 0.005em;
+}
+
+/* 三个文件字段各有自己的强调色：音频=绯红、歌词=紫、封面=蓝，
+   与页面背景的三层光晕同一套色，避免三个拾取器长得一模一样。 */
+.file-field--audio {
+  --field-accent: var(--accent-hi);
+  --field-glow: rgba(250, 45, 72, 0.16);
+  --field-edge: rgba(250, 45, 72, 0.4);
+}
+
+.file-field--lyric {
+  --field-accent: var(--violet);
+  --field-glow: rgba(179, 155, 255, 0.16);
+  --field-edge: rgba(179, 155, 255, 0.4);
+}
+
+.file-field--cover {
+  --field-accent: var(--azure);
+  --field-glow: rgba(127, 180, 255, 0.16);
+  --field-edge: rgba(127, 180, 255, 0.4);
+}
+
+.field-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: var(--field-accent, var(--accent-hi));
+  background: var(--field-glow, rgba(250, 45, 72, 0.16));
+  border: 1px solid var(--field-edge, rgba(250, 45, 72, 0.4));
+}
+
+.field-icon svg {
+  display: block;
+  width: 15px;
+  height: 15px;
 }
 
 .file-note {
-  font-size: 11.5px;
+  font-size: var(--fs-2xs);
+  line-height: 1.5;
   color: var(--faint);
 }
 
@@ -194,14 +270,14 @@ body {
 input[type="file"] {
   width: 100%;
   font: inherit;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--dim);
   cursor: pointer;
 }
 
 input[type="file"]::file-selector-button {
   font: inherit;
-  font-size: 13px;
+  font-size: var(--fs-sm);
   font-weight: 600;
   color: var(--text);
   background: var(--glass-hi);
@@ -220,8 +296,30 @@ input[type="file"]::file-selector-button:hover {
   border-color: rgba(255, 255, 255, 0.22);
 }
 
+/* 每个拾取器的按钮描边走本字段的强调色（选择器权重高于上面的通用描边） */
+.file-field--audio input[type="file"]::file-selector-button,
+.file-field--lyric input[type="file"]::file-selector-button,
+.file-field--cover input[type="file"]::file-selector-button {
+  border-color: var(--field-edge);
+}
+
+.file-field--audio input[type="file"]:not(:disabled)::file-selector-button:hover,
+.file-field--lyric input[type="file"]:not(:disabled)::file-selector-button:hover,
+.file-field--cover input[type="file"]:not(:disabled)::file-selector-button:hover {
+  background: var(--field-glow);
+  border-color: var(--field-accent);
+}
+
+/* 禁用态必须在强调色规则之后：同权重，靠顺序取胜 */
 input[type="file"]:disabled {
-  opacity: 0.45;
+  color: rgba(245, 245, 247, 0.34);
+  cursor: not-allowed;
+}
+
+input[type="file"]:disabled::file-selector-button {
+  color: rgba(245, 245, 247, 0.4);
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
   cursor: not-allowed;
 }
 
@@ -237,7 +335,7 @@ input[type="file"]:disabled {
   width: 100%;
   min-width: 0;
   font: inherit;
-  font-size: 13.5px;
+  font-size: var(--fs-md);
   color: var(--text);
   background: var(--glass-hi);
   border: 1px solid var(--line);
@@ -258,7 +356,9 @@ input[type="file"]:disabled {
 }
 
 .text-input:disabled {
-  opacity: 0.45;
+  color: rgba(245, 245, 247, 0.4);
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.08);
   cursor: not-allowed;
 }
 
@@ -301,8 +401,12 @@ input[type="file"]:disabled {
   transform: scale(0.97);
 }
 
+/* 真正的禁用态：中性填充 + 无辉光，而不是把饱和红渐变降透明度 */
 .play-btn:disabled {
-  opacity: 0.4;
+  color: rgba(245, 245, 247, 0.4);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
   cursor: not-allowed;
 }
 
@@ -314,7 +418,7 @@ input[type="file"]:disabled {
 }
 
 .time-readout {
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   color: var(--dim);
   letter-spacing: 0.04em;
   font-variant-numeric: tabular-nums;
@@ -392,7 +496,7 @@ input[type="file"]:disabled {
 
 .btn {
   font: inherit;
-  font-size: 14px;
+  font-size: var(--fs-md);
   font-weight: 600;
   color: var(--text);
   background: var(--glass-hi);
@@ -416,11 +520,6 @@ input[type="file"]:disabled {
   transform: translateY(0) scale(0.99);
 }
 
-.btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
 .btn-primary {
   width: 100%;
   border-color: rgba(255, 255, 255, 0.16);
@@ -432,6 +531,16 @@ input[type="file"]:disabled {
 
 .btn-primary:hover:not(:disabled) {
   box-shadow: 0 16px 34px -14px rgba(250, 45, 72, 1);
+}
+
+/* 放在 .btn-primary 之后并保持更高权重，禁用时中性化、去辉光 */
+.btn:disabled {
+  color: rgba(245, 245, 247, 0.42);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transform: none;
+  cursor: not-allowed;
 }
 
 .progress-track {
@@ -450,9 +559,9 @@ input[type="file"]:disabled {
 
 .hint {
   margin: 0;
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   line-height: 1.65;
-  color: var(--faint);
+  color: var(--dim);
 }
 
 /* ── 状态 / 错误 ──────────────────────────────────────── */
@@ -464,11 +573,11 @@ input[type="file"]:disabled {
 }
 
 .chip {
-  padding: 5px 11px;
+  padding: 5px 12px;
   border-radius: 999px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.06);
-  font-size: 11.5px;
+  font-size: var(--fs-xs);
   color: var(--dim);
   font-variant-numeric: tabular-nums;
 }
@@ -490,7 +599,7 @@ input[type="file"]:disabled {
   border: 1px solid rgba(250, 45, 72, 0.35);
   background: rgba(250, 45, 72, 0.12);
   color: #ffc9d1;
-  font-size: 12.5px;
+  font-size: var(--fs-sm);
   line-height: 1.6;
   overflow-wrap: anywhere;
   animation: rise 0.3s var(--ease) both;
@@ -525,12 +634,13 @@ input[type="file"]:disabled {
   justify-content: space-between;
   gap: 12px;
   padding: 0 4px;
-  font-size: 11.5px;
-  letter-spacing: 0.12em;
-  color: var(--faint);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.1em;
+  color: var(--dim);
 }
 
 .stage-frame {
+  position: relative;
   width: min(100%, calc((100vh - 250px) * 16 / 9));
   margin: 0 auto;
   aspect-ratio: 16 / 9;
@@ -550,6 +660,73 @@ input[type="file"]:disabled {
   max-width: 100%;
 }
 
+/* 空舞台：用居中的均衡器意象 + 光晕换掉大片死黑中心。
+   常驻层级在合成画布之上，载入素材后由 React 卸载。 */
+.stage-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 20px;
+  pointer-events: none;
+  background:
+    radial-gradient(58% 56% at 50% 46%, rgba(150, 90, 255, 0.18), transparent 70%),
+    radial-gradient(44% 46% at 50% 56%, rgba(250, 45, 72, 0.16), transparent 72%),
+    linear-gradient(180deg, rgba(12, 9, 22, 0.28), rgba(5, 4, 10, 0.62));
+  animation: stage-in 0.6s var(--ease) both;
+}
+
+.stage-empty-mark {
+  display: flex;
+  align-items: flex-end;
+  gap: 7px;
+  height: 46px;
+}
+
+.stage-empty-mark span {
+  width: 6px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--accent-hi), var(--accent));
+  box-shadow: 0 6px 18px -6px rgba(250, 45, 72, 0.9);
+  transform-origin: bottom;
+  animation: eq 1.7s var(--ease) infinite;
+}
+
+.stage-empty-mark span:nth-child(1) {
+  height: 16px;
+  animation-delay: 0s;
+}
+
+.stage-empty-mark span:nth-child(2) {
+  height: 30px;
+  animation-delay: 0.14s;
+}
+
+.stage-empty-mark span:nth-child(3) {
+  height: 44px;
+  animation-delay: 0.28s;
+}
+
+.stage-empty-mark span:nth-child(4) {
+  height: 26px;
+  animation-delay: 0.42s;
+}
+
+.stage-empty-mark span:nth-child(5) {
+  height: 14px;
+  animation-delay: 0.56s;
+}
+
+.stage-empty-text {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  letter-spacing: 0.22em;
+  color: var(--dim);
+}
+
 /* ── 动效 ─────────────────────────────────────────────── */
 
 @keyframes rise {
@@ -560,6 +737,27 @@ input[type="file"]:disabled {
   to {
     opacity: 1;
     transform: none;
+  }
+}
+
+@keyframes stage-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes eq {
+  0%,
+  100% {
+    transform: scaleY(0.5);
+    opacity: 0.65;
+  }
+  50% {
+    transform: scaleY(1);
+    opacity: 1;
   }
 }
 
@@ -585,6 +783,10 @@ input[type="file"]:disabled {
   .stage-panel,
   .stage-frame {
     width: 100%;
+  }
+
+  .brand {
+    font-size: 26px;
   }
 }
 
