@@ -21,20 +21,20 @@ const TIME_FONT = `18px ${FONT_STACK}`;
 const EMPTY_FONT = `18px ${FONT_STACK}`;
 
 // ---- 构图常量（1920×1080）----
-// 封面：左对齐 110–450，上缘 210 / 下缘 550。
-// 下缘 550 距歌词字顶（约 784）留出阴影尾巴空间，且让开右侧空间面板。
-const COVER_SIZE = 340;
-const COVER_X = 110;
-const COVER_Y = 210;
+// 封面：左对齐 150–550，上缘 180 / 下缘 580。
+// 下缘 580 距歌词字顶（约 784）留出阴影尾巴空间，且让开右侧空间面板。
+const COVER_SIZE = 400;
+const COVER_X = 150;
+const COVER_Y = 180;
 const COVER_RADIUS = 24;
 
-// 空间视图离屏尺寸：与面板内的绘制区域（640×520）一致，drawImage 无变形
-const ATMOS_W = 640;
-const ATMOS_H = 520;
+// 空间视图离屏尺寸：与面板内的绘制区域（720×585）一致，drawImage 无变形
+const ATMOS_W = 720;
+const ATMOS_H = 585;
 
 // 空间面板位置：横向靠右；纵向与封面中线对齐（380），面板自身也居中于此
-const ATMOS_X = 1140;
-const ATMOS_Y = COVER_Y + COVER_SIZE / 2 - ATMOS_H / 2; // 380 - 260 = 120
+const ATMOS_X = 1100;
+const ATMOS_Y = COVER_Y + COVER_SIZE / 2 - ATMOS_H / 2; // 380 - 292.5 = 87.5
 
 // 无 ADM 时的静默提示：画在空间面板正中
 const EMPTY_TEXT = "未检测到 ADM 空间音频";
@@ -264,7 +264,7 @@ export class StageRenderer {
     this.roundRectPath(x, y, size, size, radius);
     ctx.clip();
     // 封面按中心方裁后缩放；高质量重采样，restore 一并还原
-    // ponytail: 源图 < 340px 时这里仍是放大，必然发软；接入上传校验/多档预缩放后再处理
+    // ponytail: 源图 < 400px 时这里仍是放大，必然发软；接入上传校验/多档预缩放后再处理
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     const src = this.coverSourceRect(cover);
@@ -282,7 +282,7 @@ export class StageRenderer {
       return;
     }
 
-    // 无 ADM 时的静默提示：居中于摆位视图区域（ATMOS_X,ATMOS_Y 起 640×520）
+    // 无 ADM 时的静默提示：居中于摆位视图区域（ATMOS_X,ATMOS_Y 起 720×585）
     // 0.35 → 0.6：合成后约 6.4:1；0.35 在纯黑底上只有约 3:1，低于 AA
     ctx.save();
     ctx.fillStyle = "rgba(255,255,255,0.6)";

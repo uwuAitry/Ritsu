@@ -37,8 +37,8 @@ const ROOM_HALF_H = (ROOM_TOP_Y - FLOOR_Y) / 2;
 const ROOM_BOUND_FACTOR =
   Math.sqrt(ROOM_HALF_W * ROOM_HALF_W + ROOM_HALF_H * ROOM_HALF_H + ROOM_HALF_D * ROOM_HALF_D) /
   FIT_RADIUS;
-// 外接球对盒子是保守上界（盒子轮廓小于外接球），再留 5% 呼吸空间
-const ROOM_FRAME_MARGIN = 1.05;
+// 外接球对盒子是保守上界（盒子轮廓小于外接球），再留 2% 呼吸空间
+const ROOM_FRAME_MARGIN = 1.02;
 
 type ObjectNode = {
   root: THREE.Mesh;
