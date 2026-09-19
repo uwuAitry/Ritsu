@@ -129,7 +129,8 @@ interface WordBox {
 
 // 依赖调用方已设置 ctx.font；按词左到右排布。
 // 空格规则：仅当上一词未自带尾随空白、且两词不同时为单字素时，才补一个空格宽。
-function layoutWords(
+// 导出供 render/selfcheck.ts 用桩 ctx 驱动（无框架最小自检）。
+export function layoutWords(
   ctx: CanvasRenderingContext2D,
   words: LyricLine["words"],
   x: number,
