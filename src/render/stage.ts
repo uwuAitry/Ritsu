@@ -18,26 +18,26 @@ const FONT_STACK = "system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC', sans-s
 const TITLE_FONT = `bold 34px ${FONT_STACK}`;
 const ARTIST_FONT = `22px ${FONT_STACK}`;
 const TIME_FONT = `18px ${FONT_STACK}`;
+const LABEL_FONT = `16px ${FONT_STACK}`;
 const EMPTY_FONT = `18px ${FONT_STACK}`;
 
 const BADGE_TEXT = "DOLBY ATMOS";
 const BADGE_GAP = 2; // 手动字距（px）
 
 // ---- 构图常量（1920×1080）----
-// 封面：水平正中 670–1250，上缘 100 / 下缘 680。
-// 顶部留白 100 ≈ 封面下缘到歌词字顶（784）的 104，阴影尾巴不会压到歌词。
-const COVER_SIZE = 580;
-const COVER_X = (W - COVER_SIZE) / 2;
-const COVER_Y = 100;
-const COVER_RADIUS = 28;
+// 封面：左对齐 110–450，上缘 210 / 下缘 550。
+// 下缘 550 距歌词字顶（约 784）留出阴影尾巴空间，且让开右侧空间面板。
+const COVER_SIZE = 340;
+const COVER_X = 110;
+const COVER_Y = 210;
+const COVER_RADIUS = 24;
 
-// 空间视图离屏尺寸：与舞台同为 16:9，满幅放大无变形
-const ATMOS_W = 1280;
-const ATMOS_H = 720;
+// 空间视图离屏尺寸：与面板内的绘制区域（640×520）一致，drawImage 无变形
+const ATMOS_W = 640;
+const ATMOS_H = 520;
 
-// 无 ADM 时的静默提示：顶部正中，避开封面与信息条
+// 无 ADM 时的静默提示：画在空间面板正中
 const EMPTY_TEXT = "未检测到 ADM 空间音频";
-const EMPTY_Y = 62;
 
 // 唯一 Dolby Atmos 徽标：信息条右端，与标题/歌手块同高（右侧留白，不压进度条）
 const BADGE_URL =
@@ -164,10 +164,9 @@ export class StageRenderer {
     const ctx = this.ctx;
     const timeMs = this.timeMs;
 
-    // 背景栈：流体/模糊底 → 满幅空间房间 → 统一压暗的 scrim
-    // （房间压在 scrim 之下，让底部歌词/信息条始终有对比度，同时仍有环绕感）
+    // 背景栈：流体/模糊底 → 统一压暗的 scrim → 封面/歌词/空间面板/徽标/信息条
+    // （空间面板画在 scrim 之上，对象不被压暗）
     this.drawBackground(ctx);
-    this.drawAtmosView(ctx);
     ctx.fillStyle = "rgba(0,0,0,0.28)";
     ctx.fillRect(0, 0, W, H);
 
@@ -187,8 +186,8 @@ export class StageRenderer {
       { progress },
     );
 
-    // 唯一徽标
-    this.drawBadge(ctx);
+    this.drawAtmosPanel(ctx);
+    this.drawBadge(ctx); // 保持单枚徽标
 
     this.drawInfoBar(ctx);
   }
@@ -259,24 +258,44 @@ export class StageRenderer {
     ctx.restore();
   }
 
-  // 空间视图：无面板、无描边、无标签，整帧铺满（离屏 1280×720 → 1920×1080，同为 16:9 无变形）。
-  // 离屏画布透明底，舞台背景自然透出。
-  // ponytail: 居中封面会遮住房间正中那批对象（前方 ±45° 内的点）。
-  // 若将来摆位精度比封面锚点更重要，再给被遮挡对象加引线或改用侧栏小图。
-  private drawAtmosView(ctx: CanvasRenderingContext2D): void {
-    if (!this.adm) {
-      // 空状态：纯文字、无底框；位于顶部正中，避开封面与信息条
-      ctx.save();
-      ctx.fillStyle = "rgba(255,255,255,0.42)";
+  // 空间面板：圆角描边 + 左上角标签，内部裁剪后绘制摆位视图。
+  // 不画底色：对象直接浮在流体背景上（旧版此处有 rgba(255,255,255,0.05) 填充）。
+  private drawAtmosPanel(ctx: CanvasRenderingContext2D): void {
+    const x = 1120;
+    const y = 250;
+    const w = 680;
+    const h = 560;
+    const radius = 20;
+
+    ctx.save();
+    ctx.beginPath();
+    this.roundRectPath(x, y, w, h, radius);
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(255,255,255,0.12)";
+    ctx.stroke();
+
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+    ctx.fillStyle = "rgba(255,255,255,0.65)";
+    ctx.font = LABEL_FONT;
+    ctx.fillText("Dolby Atmos 空间摆位", 1140, 285);
+
+    if (this.adm) {
+      ctx.beginPath();
+      this.roundRectPath(x, y, w, h, radius);
+      ctx.clip();
+      this.atmos.render();
+      ctx.drawImage(this.atmos.canvas, 1140, 310, 640, 520);
+    } else {
+      ctx.fillStyle = "rgba(255,255,255,0.35)";
       ctx.font = EMPTY_FONT;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(EMPTY_TEXT, W / 2, EMPTY_Y);
-      ctx.restore();
-      return;
+      ctx.fillText(EMPTY_TEXT, x + w / 2, y + h / 2);
     }
-    this.atmos.render();
-    ctx.drawImage(this.atmos.canvas, 0, 0, W, H);
+    ctx.restore();
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
   }
 
   // 唯一徽标：远程 PNG，按原始比例绘制；未就绪/失败时回退矢量文字，帧永不空缺
