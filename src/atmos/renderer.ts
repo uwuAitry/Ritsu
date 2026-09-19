@@ -8,9 +8,21 @@ import type { AdmKeyframe, AdmObject } from "../types";
 const OBJECT_RADIUS = 0.05;
 // 需完整入镜的包围球半径（单位球 + 光晕余量）
 const FIT_RADIUS = 1.25;
-// 相机方向：原点后方偏上。ADM 前方映射到屏幕内，形成“玻璃后的房间”透视
-const CAMERA_DIR = new THREE.Vector3(0, 1.6, 3.2).normalize();
+// 相机方向：原点前左上方。方位角约 30°（偏画面左）、俯角约 20°，
+// 形成两点透视——最近的竖直棱落在画面中心左侧，视线略向下但无侧倾（lookAt 默认 up）
+const CAMERA_DIR = new THREE.Vector3(-0.47, 0.342, 0.814).normalize();
 const CAMERA_TARGET = new THREE.Vector3(0, 0.05, 0);
+
+// 房间线框：地板格 + 背墙/右侧墙轮廓。钢蓝色细线，无填充/无背景，
+// 只为摆位视图提供“房间”参照，画布保持透明以便 alpha 合成与 captureStream 导出
+const ROOM_COLOR = 0x4a5a6a;
+const ROOM_LINE_OPACITY = 0.5;
+const FLOOR_Y = -1; // 单位球最低点，对象漂浮其上方
+const ROOM_TOP_Y = 1;
+const ROOM_HALF_W = 1.25; // x 半宽：5 格 × 0.5
+const ROOM_HALF_D = 1; // z 半深：4 格 × 0.5
+const GRID_COLS = 5;
+const GRID_ROWS = 4;
 
 type ObjectNode = {
   root: THREE.Mesh;
@@ -49,6 +61,45 @@ function makeGlowTexture(): THREE.CanvasTexture {
   return texture;
 }
 
+// 线框：positions 为成对线段端点。WebGL 忽略 linewidth，天然 1px 细线
+function makeLineSegments(positions: number[]): THREE.LineSegments {
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  return new THREE.LineSegments(
+    geometry,
+    new THREE.LineBasicMaterial({
+      color: ROOM_COLOR,
+      transparent: true,
+      opacity: ROOM_LINE_OPACITY,
+      depthWrite: false,
+    }),
+  );
+}
+
+// 地板格（5×4 格）+ 背墙/右侧墙轮廓：纯线框，无天花板、无填充
+function makeRoom(): THREE.LineSegments {
+  const p: number[] = [];
+  const w = ROOM_HALF_W;
+  const d = ROOM_HALF_D;
+  // 地板：沿 x 的 6 条竖线 + 沿 z 的 5 条横线
+  for (let i = 0; i <= GRID_COLS; i += 1) {
+    const x = -w + (2 * w * i) / GRID_COLS;
+    p.push(x, FLOOR_Y, -d, x, FLOOR_Y, d);
+  }
+  for (let j = 0; j <= GRID_ROWS; j += 1) {
+    const z = -d + (2 * d * j) / GRID_ROWS;
+    p.push(-w, FLOOR_Y, z, w, FLOOR_Y, z);
+  }
+  // 背墙（z=-d）：顶边 + 左右竖棱（底边与地板横线重合，省去）
+  p.push(-w, ROOM_TOP_Y, -d, w, ROOM_TOP_Y, -d);
+  p.push(-w, FLOOR_Y, -d, -w, ROOM_TOP_Y, -d);
+  p.push(w, FLOOR_Y, -d, w, ROOM_TOP_Y, -d);
+  // 右侧墙（x=+w）：顶边 + 前竖棱（后竖棱即背墙右棱）
+  p.push(w, ROOM_TOP_Y, -d, w, ROOM_TOP_Y, d);
+  p.push(w, FLOOR_Y, d, w, ROOM_TOP_Y, d);
+  return makeLineSegments(p);
+}
+
 export class AtmosRenderer {
   readonly canvas: HTMLCanvasElement;
 
@@ -76,13 +127,16 @@ export class AtmosRenderer {
     this.sphereGeometry = new THREE.SphereGeometry(OBJECT_RADIUS, 16, 12);
     this.glowTexture = makeGlowTexture();
 
-    // 原点听者标记：细环，标示听者位置；既不是音频对象也不是测距标尺
-    this.scene.add(
-      new THREE.Mesh(
-        new THREE.TorusGeometry(0.05, 0.007, 8, 40),
-        new THREE.MeshBasicMaterial({ color: 0x9fb0c4, transparent: true, opacity: 0.4, depthWrite: false }),
-      ),
+    // 原点听者标记：细环，标示听者位置；转平落在 XZ 平面（水平面），既不是音频对象也不是测距标尺
+    const listener = new THREE.Mesh(
+      new THREE.TorusGeometry(0.05, 0.007, 8, 40),
+      new THREE.MeshBasicMaterial({ color: 0x9fb0c4, transparent: true, opacity: 0.4, depthWrite: false }),
     );
+    listener.rotation.x = -Math.PI / 2;
+    this.scene.add(listener);
+
+    // 房间线框：给对象云一个地板与墙角参照
+    this.scene.add(makeRoom());
 
     this.resize(width, height);
   }
@@ -198,9 +252,12 @@ export class AtmosRenderer {
       for (const m of node.materials) m.dispose();
     }
     this.sphereGeometry.dispose();
-    // 场景其余 Mesh（听者环等）：跳过共享球几何，避免重复 dispose
+    // 场景其余 Mesh/LineSegments（听者环、房间线框等）：跳过共享球几何，避免重复 dispose
     this.scene.traverse((obj) => {
-      if (obj instanceof THREE.Mesh && obj.geometry !== this.sphereGeometry) {
+      if (
+        (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments) &&
+        obj.geometry !== this.sphereGeometry
+      ) {
         obj.geometry.dispose();
         const material = obj.material;
         if (Array.isArray(material)) material.forEach((m) => m.dispose());
