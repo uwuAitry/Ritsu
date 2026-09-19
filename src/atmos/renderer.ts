@@ -24,13 +24,13 @@ const ROOM_LINE_OPACITY = 0.75;
 // fitRadius / FIT_RADIUS 整体等比缩放，因此基准值不变也能随取景半径伸缩
 const FLOOR_Y = -1; // 单位球最低点，对象漂浮其上方
 const ROOM_TOP_Y = 1;
-const ROOM_HALF_W = 1.25; // x 半宽：5 格 × 0.5
-const ROOM_HALF_D = 1; // z 半深：4 格 × 0.5
-const GRID_COLS = 5;
-const GRID_ROWS = 4;
+const ROOM_HALF_W = 1.5; // x 半宽：6 格 × 0.5
+const ROOM_HALF_D = 1.25; // z 半深：5 格 × 0.5
+const GRID_COLS = 6;
+const GRID_ROWS = 5;
 
 // 房间外接球系数：fitCamera 按「包围球」取景，而基准盒半对角
-// sqrt(1.25² + 1² + 1²) ≈ 1.888 > FIT_RADIUS 1.25——取景半径若只覆盖 fitRadius，
+// sqrt(1.5² + 1² + 1.25²) ≈ 2.194 > FIT_RADIUS 1.25——取景半径若只覆盖 fitRadius，
 // 墙角必然落在保证入镜球之外（房间被裁切）。房间随 fitRadius 等比缩放，此比值恒定。
 const ROOM_HALF_H = (ROOM_TOP_Y - FLOOR_Y) / 2;
 const ROOM_BOUND_FACTOR =
@@ -91,12 +91,12 @@ function makeLineSegments(positions: number[]): THREE.LineSegments {
   );
 }
 
-// 地板格（5×4 格）+ 背墙/右侧墙轮廓：纯线框，无天花板、无填充
+// 地板格（6×5 格）+ 背墙/右侧墙轮廓：纯线框，无天花板、无填充
 function makeRoom(): THREE.LineSegments {
   const p: number[] = [];
   const w = ROOM_HALF_W;
   const d = ROOM_HALF_D;
-  // 地板：沿 x 的 6 条竖线 + 沿 z 的 5 条横线
+  // 地板：沿 x 的 7 条竖线 + 沿 z 的 6 条横线
   for (let i = 0; i <= GRID_COLS; i += 1) {
     const x = -w + (2 * w * i) / GRID_COLS;
     p.push(x, FLOOR_Y, -d, x, FLOOR_Y, d);
@@ -205,7 +205,7 @@ export class AtmosRenderer {
     // 房间随 fitRadius 等比缩放：对象云越散、相机后撤多少，房间就放大多少，
     // 于是任何取景半径下房间都保持同样的留白比例（fitRadius 已含 +0.25 光晕余量，
     // 房间边角落在球外一点，仍在画面内且留有余裕）。
-    // 等比缩放同时让格子在屏幕上的疏密恒定，故 5×4 不再加密——加密会把它推向亮笼子
+    // 等比缩放同时让格子在屏幕上的疏密恒定，故 6×5 不再加密——加密会把它推向亮笼子
     this.room.scale.setScalar(this.fitRadius / FIT_RADIUS);
     this.fitCamera(this.viewW, this.viewH);
 
