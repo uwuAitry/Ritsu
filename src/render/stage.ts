@@ -264,8 +264,9 @@ export class StageRenderer {
     }
 
     // 无 ADM 时的静默提示：居中于摆位视图区域（1140,310 起 640×520）
+    // 0.35 → 0.6：合成后约 6.4:1；0.35 在纯黑底上只有约 3:1，低于 AA
     ctx.save();
-    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.fillStyle = "rgba(255,255,255,0.6)";
     ctx.font = EMPTY_FONT;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
