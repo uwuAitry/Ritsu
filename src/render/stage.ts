@@ -32,6 +32,10 @@ const COVER_RADIUS = 24;
 const ATMOS_W = 640;
 const ATMOS_H = 520;
 
+// 空间面板位置：横向靠右；纵向与封面中线对齐（380），面板自身也居中于此
+const ATMOS_X = 1140;
+const ATMOS_Y = COVER_Y + COVER_SIZE / 2 - ATMOS_H / 2; // 380 - 260 = 120
+
 // 无 ADM 时的静默提示：画在空间面板正中
 const EMPTY_TEXT = "未检测到 ADM 空间音频";
 
@@ -200,24 +204,30 @@ export class StageRenderer {
   // ---- 绘制分块 ----
 
   private drawBackground(ctx: CanvasRenderingContext2D): void {
+    // 背景全程涉及缩放（流体底充满画布 / 封面放大 + 模糊），统一走高质量重采样，
+    // 退出时 restore 还原（ctx 跨帧复用，不能让状态泄漏到其它绘制）。
+    ctx.save();
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+
     const bg = this.findBgCanvas();
     if (bg) {
       ctx.drawImage(bg, 0, 0, W, H);
+      ctx.restore();
       return;
     }
 
     const cover = this.cover;
     if (cover && this.coverReady(cover)) {
-      ctx.save();
       ctx.filter = "blur(80px)";
       ctx.drawImage(cover, -60, -60, W + 120, H + 120);
       ctx.restore();
-      ctx.filter = "none";
       return;
     }
 
     ctx.fillStyle = this.darkGradient;
     ctx.fillRect(0, 0, W, H);
+    ctx.restore();
   }
 
   private drawCover(ctx: CanvasRenderingContext2D): void {
@@ -248,6 +258,10 @@ export class StageRenderer {
     ctx.beginPath();
     this.roundRectPath(x, y, size, size, radius);
     ctx.clip();
+    // 封面按中心方裁后缩放；高质量重采样，restore 一并还原
+    // ponytail: 源图 < 340px 时这里仍是放大，必然发软；接入上传校验/多档预缩放后再处理
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
     const src = this.coverSourceRect(cover);
     ctx.drawImage(cover, src.sx, src.sy, src.sw, src.sh, x, y, size, size);
     ctx.restore();
@@ -259,18 +273,18 @@ export class StageRenderer {
   private drawAtmosPanel(ctx: CanvasRenderingContext2D): void {
     if (this.adm) {
       this.atmos.render();
-      ctx.drawImage(this.atmos.canvas, 1140, 310, 640, 520);
+      ctx.drawImage(this.atmos.canvas, ATMOS_X, ATMOS_Y, ATMOS_W, ATMOS_H);
       return;
     }
 
-    // 无 ADM 时的静默提示：居中于摆位视图区域（1140,310 起 640×520）
+    // 无 ADM 时的静默提示：居中于摆位视图区域（ATMOS_X,ATMOS_Y 起 640×520）
     // 0.35 → 0.6：合成后约 6.4:1；0.35 在纯黑底上只有约 3:1，低于 AA
     ctx.save();
     ctx.fillStyle = "rgba(255,255,255,0.6)";
     ctx.font = EMPTY_FONT;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(EMPTY_TEXT, 1460, 570);
+    ctx.fillText(EMPTY_TEXT, ATMOS_X + ATMOS_W / 2, ATMOS_Y + ATMOS_H / 2);
     ctx.restore();
   }
 
@@ -278,22 +292,31 @@ export class StageRenderer {
   private drawBadge(ctx: CanvasRenderingContext2D): void {
     const art = this.badgeArt;
     if (!art) return;
-    const h = BADGE_W * (art.height / art.width); // 665×95 → ≈31px
+    // art 已按显示尺寸烘焙，这里 1:1 落图（不再经过低质 3× 缩小）
+    const h = BADGE_W * (art.height / art.width);
     ctx.drawImage(art, BADGE_RIGHT_X - BADGE_W, BADGE_MID_Y - h / 2, BADGE_W, h);
   }
 
   // 远程 PNG 是纯黑字形 + 透明底（浅色背景版本），直接画在暗舞台上等于隐形：
   // 就绪后一次性烘焙成白色剪影（source-in 只保留 alpha），原始字形与比例不变。
+  // 关键：在这里就降到 drawBadge 实际使用的尺寸，让最终 drawImage 变成 1:1。
+  // 若保留原始 665×95 再在 drawBadge 缩到 220 宽，等于每帧走一次 3× 低质缩放 → 徽标发糊。
   private bakeBadge(img: HTMLImageElement): void {
+    const w = BADGE_W;
+    // 与 drawBadge 的 h = BADGE_W * (h / w) 同一套比例，烘焙后公式依旧成立
+    const h = Math.round(w * (img.naturalHeight / img.naturalWidth));
+    if (img.naturalWidth === 0 || img.naturalHeight === 0 || h === 0) return;
     const art = document.createElement("canvas");
-    art.width = img.naturalWidth;
-    art.height = img.naturalHeight;
+    art.width = w;
+    art.height = h;
     const g = art.getContext("2d");
-    if (!g || art.width === 0 || art.height === 0) return;
-    g.drawImage(img, 0, 0);
+    if (!g) return;
+    g.imageSmoothingEnabled = true;
+    g.imageSmoothingQuality = "high";
+    g.drawImage(img, 0, 0, w, h);
     g.globalCompositeOperation = "source-in";
     g.fillStyle = "#ffffff";
-    g.fillRect(0, 0, art.width, art.height);
+    g.fillRect(0, 0, w, h);
     this.badgeArt = art;
     this.render(); // 就绪后立即重绘，不必等下一次状态变化
   }

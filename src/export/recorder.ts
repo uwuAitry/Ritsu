@@ -1,5 +1,13 @@
 // 视频导出：实时录制舞台 canvas + 音频，v1 只做实时（录制时长 == 播放时长）。
 
+// 1080p30 默认视频码率：20 Mbps。
+// 平台推荐值（YouTube 1080p30 SDR ≈ 8 Mbps）只是"能看"的下限；本片有大量大面积渐变与
+// 高斯模糊，低码率最先在这些区域出色带 / 块效应。20 Mbps 留出余量，且远低于浏览器
+// MediaRecorder 的 H.264/VP9 编码上限（在线预览/导出都是实时，码率不构成负担）。
+const DEFAULT_VIDEO_BPS = 20_000_000;
+// 立体声 192 kbps 对 AAC / Opus 都接近透明，不再上调。
+const AUDIO_BPS = 192_000;
+
 // 优先 MP4/H.264，其次 WebM/VP9；返回空 mimeType 表示让 MediaRecorder 自选默认。
 export function pickMimeType(): { mimeType: string; extension: "mp4" | "webm" } {
   const mp4 = [
@@ -25,6 +33,7 @@ export function exportVideo(opts: {
   audio: MediaStream | null;
   durationSec: number;
   fps?: number;
+  videoBitsPerSecond?: number;
   onProgress?: (ratio: number) => void;
 }): Promise<Blob> {
   return new Promise<Blob>((resolve, reject) => {
@@ -43,8 +52,8 @@ export function exportVideo(opts: {
     try {
       recorder = new MediaRecorder(stream, {
         ...(mimeType ? { mimeType } : {}),
-        videoBitsPerSecond: 12_000_000,
-        audioBitsPerSecond: 192_000,
+        videoBitsPerSecond: opts.videoBitsPerSecond ?? DEFAULT_VIDEO_BPS,
+        audioBitsPerSecond: AUDIO_BPS,
       });
     } catch (e) {
       reject(new Error(`无法创建 MediaRecorder：${e instanceof Error ? e.message : String(e)}`));
