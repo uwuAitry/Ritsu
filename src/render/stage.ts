@@ -20,9 +20,6 @@ const ARTIST_FONT = `22px ${FONT_STACK}`;
 const TIME_FONT = `18px ${FONT_STACK}`;
 const EMPTY_FONT = `18px ${FONT_STACK}`;
 
-const BADGE_TEXT = "DOLBY ATMOS";
-const BADGE_GAP = 2; // 手动字距（px）
-
 // ---- 构图常量（1920×1080）----
 // 封面：左对齐 110–450，上缘 210 / 下缘 550。
 // 下缘 550 距歌词字顶（约 784）留出阴影尾巴空间，且让开右侧空间面板。
@@ -90,9 +87,8 @@ export class StageRenderer {
 
   // 静态资源缓存（跨帧复用）
   private readonly darkGradient: CanvasGradient;
-  private readonly badgeMetrics = new Map<string, { widths: number[]; total: number }>();
 
-  // 远程徽标：只加载一次；badgeArt 非空即就绪，为空（加载中/失败）时走矢量兜底
+  // 远程徽标：只加载一次；badgeArt 非空即就绪
   private readonly badgeImg: HTMLImageElement;
   private badgeArt: HTMLCanvasElement | null = null;
 
@@ -277,15 +273,12 @@ export class StageRenderer {
     ctx.restore();
   }
 
-  // 唯一徽标：远程 PNG，按原始比例绘制；未就绪/失败时回退矢量文字，帧永不空缺
+  // 唯一徽标：远程 PNG，按原始比例绘制；未就绪的帧不画
   private drawBadge(ctx: CanvasRenderingContext2D): void {
     const art = this.badgeArt;
-    if (art) {
-      const h = BADGE_W * (art.height / art.width); // 665×95 → ≈31px
-      ctx.drawImage(art, BADGE_RIGHT_X - BADGE_W, BADGE_MID_Y - h / 2, BADGE_W, h);
-      return;
-    }
-    this.drawAtmosBadge(ctx, BADGE_RIGHT_X, BADGE_MID_Y + 5);
+    if (!art) return;
+    const h = BADGE_W * (art.height / art.width); // 665×95 → ≈31px
+    ctx.drawImage(art, BADGE_RIGHT_X - BADGE_W, BADGE_MID_Y - h / 2, BADGE_W, h);
   }
 
   // 远程 PNG 是纯黑字形 + 透明底（浅色背景版本），直接画在暗舞台上等于隐形：
@@ -295,7 +288,7 @@ export class StageRenderer {
     art.width = img.naturalWidth;
     art.height = img.naturalHeight;
     const g = art.getContext("2d");
-    if (!g || art.width === 0 || art.height === 0) return; // 保持矢量兜底
+    if (!g || art.width === 0 || art.height === 0) return;
     g.drawImage(img, 0, 0);
     g.globalCompositeOperation = "source-in";
     g.fillStyle = "#ffffff";
@@ -340,48 +333,6 @@ export class StageRenderer {
     ctx.textAlign = "left";
   }
 
-  // 矢量兜底：右对齐的 letterspaced "DOLBY ATMOS" + 双 D 标记（远程 PNG 不可用时使用）
-  private drawAtmosBadge(ctx: CanvasRenderingContext2D, right: number, y: number, size = 14): void {
-    const font = `bold ${size}px ${FONT_STACK}`;
-    const metrics = this.measureBadge(ctx, font);
-    const markH = size * 0.72;
-    const markW = markH * 2;
-    const markGap = size * 0.5;
-    const totalW = markW + markGap + metrics.total;
-    const startX = right - totalW;
-
-    ctx.save();
-    ctx.font = font;
-    ctx.fillStyle = "rgba(255,255,255,0.75)";
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
-
-    this.drawDoubleD(ctx, startX, y - markH, markH);
-
-    let cursor = startX + markW + markGap;
-    for (let i = 0; i < BADGE_TEXT.length; i += 1) {
-      ctx.fillText(BADGE_TEXT[i], cursor, y);
-      cursor += metrics.widths[i] + BADGE_GAP;
-    }
-    ctx.restore();
-  }
-
-  // 双 D 标记：两段相背的半圆弧描边（极简示意）
-  private drawDoubleD(ctx: CanvasRenderingContext2D, x: number, top: number, h: number): void {
-    const r = h / 2;
-    const cy = top + r;
-    ctx.save();
-    ctx.lineWidth = Math.max(1, h * 0.16);
-    ctx.strokeStyle = "rgba(255,255,255,0.75)";
-    ctx.beginPath();
-    ctx.arc(x + r, cy, r, Math.PI / 2, Math.PI * 1.5, false);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.arc(x + r * 3, cy, r, -Math.PI / 2, Math.PI / 2, false);
-    ctx.stroke();
-    ctx.restore();
-  }
-
   // ---- 小工具 ----
 
   private findBgCanvas(): HTMLCanvasElement | null {
@@ -411,22 +362,6 @@ export class StageRenderer {
     if (this.durationMs > 0) return this.durationMs;
     const last = this.lines[this.lines.length - 1];
     return last && last.endTime > 0 ? last.endTime : 0;
-  }
-
-  private measureBadge(
-    ctx: CanvasRenderingContext2D,
-    font: string,
-  ): { widths: number[]; total: number } {
-    const cached = this.badgeMetrics.get(font);
-    if (cached) return cached;
-    ctx.save();
-    ctx.font = font;
-    const widths = Array.from(BADGE_TEXT, (ch) => ctx.measureText(ch).width);
-    ctx.restore();
-    const total = widths.reduce((a, b) => a + b, 0) + BADGE_GAP * (BADGE_TEXT.length - 1);
-    const metrics = { widths, total };
-    this.badgeMetrics.set(font, metrics);
-    return metrics;
   }
 
   private fillRoundBar(
