@@ -41,7 +41,9 @@ const SHADOW_COLOR = "rgba(0,0,0,0.55)";
 const SHADOW_BLUR = 12;
 const SHADOW_OFFSET_Y = 2;
 const GLOW_BLUR = 0.6; // → min(0.3, blur*0.3) = 0.18em 白晕
-const GLOW_PERIOD_MS = 700; // glowLevel 呼吸周期
+const GLOW_ATTACK_MS = 200; // 辉光包络：词头淡入时长
+const GLOW_RELEASE_MS = 250; // 辉光包络：词尾淡出时长
+const GLOW_STEADY = 0.6; // 辉光稳态亮度（包络峰值）
 const EMPHASIS_MIN_MS = 1000; // 强调门槛：词时长 ≥ 1000ms
 const RE_CJK = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/;
 
@@ -101,9 +103,16 @@ function isEmphasized(word: LyricWord, timeMs: number): boolean {
   return len > 1 && len <= 7;
 }
 
-// 白晕呼吸：0.2..0.9
-function glowLevelAt(timeMs: number): number {
-  return 0.55 + 0.35 * Math.sin((timeMs / GLOW_PERIOD_MS) * Math.PI * 2);
+// 强调词白晕包络：用词本地时间 (timeMs - word.startTime) 驱动，词头 200ms 平滑淡入到稳态，
+// 词尾 250ms 平滑淡出到 0；词边界外恒为 0。无振荡、无绝对时间相位依赖，保持纯 timeMs 驱动
+// （预览与导出逐帧一致）。
+// ponytail: 200+250=450ms < EMPHASIS_MIN_MS(1000ms)，最短强调词也放得下完整包络，无需截断。
+function glowLevelAt(word: LyricWord, timeMs: number): number {
+  const local = timeMs - word.startTime;
+  const dur = word.endTime - word.startTime;
+  if (!Number.isFinite(dur) || dur <= 0 || local <= 0 || local >= dur) return 0;
+  const k = Math.min(clamp01(local / GLOW_ATTACK_MS), clamp01((dur - local) / GLOW_RELEASE_MS));
+  return GLOW_STEADY * k * k * (3 - 2 * k); // smoothstep：包络两端斜率为 0，无亮度突变
 }
 
 export function findActiveLine(lines: LyricLine[], timeMs: number): number {
@@ -270,7 +279,7 @@ export function drawLyricLine(
 
     // 强调词白光：同色重绘一遍，只多出一圈白晕；黑色投影仍作基础可读性保障。
     if (progressive && isEmphasized(box.word, timeMs)) {
-      ctx.shadowColor = `rgba(255,255,255,${glowLevelAt(timeMs)})`;
+      ctx.shadowColor = `rgba(255,255,255,${glowLevelAt(box.word, timeMs)})`;
       ctx.shadowBlur = Math.min(0.3, GLOW_BLUR * 0.3) * finalSize;
       ctx.shadowOffsetY = 0;
       paintBox(box, i);
