@@ -18,7 +18,6 @@ const FONT_STACK = "system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC', sans-s
 const TITLE_FONT = `bold 34px ${FONT_STACK}`;
 const ARTIST_FONT = `22px ${FONT_STACK}`;
 const TIME_FONT = `18px ${FONT_STACK}`;
-const LABEL_FONT = `16px ${FONT_STACK}`;
 const EMPTY_FONT = `18px ${FONT_STACK}`;
 
 const BADGE_TEXT = "DOLBY ATMOS";
@@ -258,44 +257,24 @@ export class StageRenderer {
     ctx.restore();
   }
 
-  // 空间面板：圆角描边 + 左上角标签，内部裁剪后绘制摆位视图。
-  // 不画底色：对象直接浮在流体背景上（旧版此处有 rgba(255,255,255,0.05) 填充）。
+  // 空间面板：无边框、无标签、无底色——摆位视图直接浮在流体背景上。
+  // 不裁剪也不画圆角：Atmos 画布整幅透明（clearColor alpha=0）且对象远在边缘之内，
+  // 圆角裁剪只会切到透明像素；边框没了，也没有需要圆角对齐的框。
   private drawAtmosPanel(ctx: CanvasRenderingContext2D): void {
-    const x = 1120;
-    const y = 250;
-    const w = 680;
-    const h = 560;
-    const radius = 20;
-
-    ctx.save();
-    ctx.beginPath();
-    this.roundRectPath(x, y, w, h, radius);
-    ctx.lineWidth = 1;
-    ctx.strokeStyle = "rgba(255,255,255,0.12)";
-    ctx.stroke();
-
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
-    ctx.fillStyle = "rgba(255,255,255,0.65)";
-    ctx.font = LABEL_FONT;
-    ctx.fillText("Dolby Atmos 空间摆位", 1140, 285);
-
     if (this.adm) {
-      ctx.beginPath();
-      this.roundRectPath(x, y, w, h, radius);
-      ctx.clip();
       this.atmos.render();
       ctx.drawImage(this.atmos.canvas, 1140, 310, 640, 520);
-    } else {
-      ctx.fillStyle = "rgba(255,255,255,0.35)";
-      ctx.font = EMPTY_FONT;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(EMPTY_TEXT, x + w / 2, y + h / 2);
+      return;
     }
+
+    // 无 ADM 时的静默提示：居中于摆位视图区域（1140,310 起 640×520）
+    ctx.save();
+    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.font = EMPTY_FONT;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(EMPTY_TEXT, 1460, 570);
     ctx.restore();
-    ctx.textAlign = "left";
-    ctx.textBaseline = "alphabetic";
   }
 
   // 唯一徽标：远程 PNG，按原始比例绘制；未就绪/失败时回退矢量文字，帧永不空缺

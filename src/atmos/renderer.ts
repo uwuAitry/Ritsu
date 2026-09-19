@@ -11,7 +11,6 @@ const FIT_RADIUS = 1.25;
 // 相机方向：原点后方偏上。ADM 前方映射到屏幕内，形成“玻璃后的房间”透视
 const CAMERA_DIR = new THREE.Vector3(0, 1.6, 3.2).normalize();
 const CAMERA_TARGET = new THREE.Vector3(0, 0.05, 0);
-const LINE_COLOR = 0x8fa6c0;
 
 type ObjectNode = {
   root: THREE.Mesh;
@@ -25,7 +24,8 @@ function hueFromKey(key: string): number {
   return (h * 137.508) % 360;
 }
 
-// 白色径向渐变贴图，用作对象外发光（加色混合）
+// 中空环状白色光晕贴图（加色混合）：中心 alpha=0，小球本色从中心透出；
+// 能量集中在半径中段（约 1.25 倍小球半径处，正好落在小球轮廓外侧），内外两侧平滑衰减，无硬环边。
 function makeGlowTexture(): THREE.CanvasTexture {
   const size = 64;
   const canvas = document.createElement("canvas");
@@ -34,23 +34,18 @@ function makeGlowTexture(): THREE.CanvasTexture {
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("AtmosRenderer: 2D canvas context unavailable");
   const gradient = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-  gradient.addColorStop(0, "rgba(255,255,255,1)");
-  gradient.addColorStop(0.35, "rgba(255,255,255,0.4)");
+  gradient.addColorStop(0, "rgba(255,255,255,0)");
+  gradient.addColorStop(0.22, "rgba(255,255,255,0.10)");
+  gradient.addColorStop(0.42, "rgba(255,255,255,0.30)");
+  gradient.addColorStop(0.55, "rgba(255,255,255,0.34)");
+  gradient.addColorStop(0.72, "rgba(255,255,255,0.15)");
+  gradient.addColorStop(0.88, "rgba(255,255,255,0.04)");
   gradient.addColorStop(1, "rgba(255,255,255,0)");
   ctx.fillStyle = gradient;
   ctx.fillRect(0, 0, size, size);
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
   return texture;
-}
-
-// 参考线统一“淡出”：半透明 + 不写深度，避免挡住对象小球
-function setFaint(material: THREE.Material | THREE.Material[], opacity: number): void {
-  for (const m of Array.isArray(material) ? material : [material]) {
-    m.transparent = true;
-    m.opacity = opacity;
-    m.depthWrite = false;
-  }
 }
 
 export class AtmosRenderer {
@@ -75,7 +70,14 @@ export class AtmosRenderer {
     this.sphereGeometry = new THREE.SphereGeometry(OBJECT_RADIUS, 16, 12);
     this.glowTexture = makeGlowTexture();
 
-    this.scene.add(this.buildReferenceFrame());
+    // 原点听者标记：细环，标示听者位置；既不是音频对象也不是测距标尺
+    this.scene.add(
+      new THREE.Mesh(
+        new THREE.TorusGeometry(0.05, 0.007, 8, 40),
+        new THREE.MeshBasicMaterial({ color: 0x9fb0c4, transparent: true, opacity: 0.4, depthWrite: false }),
+      ),
+    );
+
     this.resize(width, height);
   }
 
@@ -119,9 +121,9 @@ export class AtmosRenderer {
   }
 
   dispose(): void {
-    // 场景里只有 Mesh / Line / Sprite（Line 覆盖 LineSegments / LineLoop）
+    // 场景里只有 Mesh（对象小球、听者环）和 Sprite（光晕）；无 Line/LineSegments 之类
     this.scene.traverse((obj) => {
-      if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
+      if (obj instanceof THREE.Mesh) {
         obj.geometry.dispose();
         const material = obj.material;
         if (Array.isArray(material)) material.forEach((m) => m.dispose());
@@ -149,65 +151,23 @@ export class AtmosRenderer {
   }
 
   private createNode(key: string): ObjectNode {
-    const color = new THREE.Color().setHSL(hueFromKey(key) / 360, 0.72, 0.62);
+    // 高饱和 + 中低明度：相邻对象单凭色相就能分辨，加色光晕也不会把本色洗成白
+    const color = new THREE.Color().setHSL(hueFromKey(key) / 360, 0.85, 0.58);
     const body = new THREE.MeshBasicMaterial({ color });
     const halo = new THREE.SpriteMaterial({
       map: this.glowTexture,
       color,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.5,
       depthTest: false, // 光晕始终叠在小球上，形成柔和外发光
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
     const root = new THREE.Mesh(this.sphereGeometry, body);
     const sprite = new THREE.Sprite(halo);
-    sprite.scale.setScalar(OBJECT_RADIUS * 7);
+    sprite.scale.setScalar(OBJECT_RADIUS * 4.5);
     sprite.renderOrder = 1;
     root.add(sprite);
     return { root, materials: [body, halo] };
-  }
-
-  // 参考系：水平极坐标网格（耳高面）+ 前后竖直子午圈 + 三轴提示 + 原点听者标记
-  private buildReferenceFrame(): THREE.Object3D {
-    const frame = new THREE.Group();
-
-    const grid = new THREE.PolarGridHelper(1, 8, 4, 64, LINE_COLOR, LINE_COLOR);
-    setFaint(grid.material, 0.16);
-    frame.add(grid);
-
-    const meridian: THREE.Vector3[] = [];
-    for (let i = 0; i < 96; i += 1) {
-      const a = (i / 96) * Math.PI * 2;
-      meridian.push(new THREE.Vector3(0, Math.sin(a), Math.cos(a)));
-    }
-    frame.add(
-      new THREE.LineLoop(
-        new THREE.BufferGeometry().setFromPoints(meridian),
-        new THREE.LineBasicMaterial({ color: LINE_COLOR, transparent: true, opacity: 0.16, depthWrite: false }),
-      ),
-    );
-
-    const origin = new THREE.Vector3(0, 0, 0);
-    const axes = new THREE.LineSegments(
-      new THREE.BufferGeometry().setFromPoints([
-        origin,
-        new THREE.Vector3(1, 0, 0), // ADM +x = 右
-        origin,
-        new THREE.Vector3(0, 0, -1), // ADM +y = 前（屏幕内）
-        origin,
-        new THREE.Vector3(0, 1, 0), // ADM +z = 上
-      ]),
-      new THREE.LineBasicMaterial({ color: 0xb6c6dc, transparent: true, opacity: 0.35, depthWrite: false }),
-    );
-    frame.add(axes);
-
-    const listener = new THREE.Mesh(
-      new THREE.SphereGeometry(0.03, 12, 8),
-      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.5, depthWrite: false }),
-    );
-    frame.add(listener);
-
-    return frame;
   }
 }
