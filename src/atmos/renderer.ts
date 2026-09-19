@@ -4,8 +4,10 @@ import type { AdmKeyframe, AdmObject } from "../types";
 // AtmosRenderer：ADM 摆位 3D 视图。
 // 只拥有一个离屏 canvas（不挂载 DOM、不是 React 组件），由 compositor drawImage 到 1920×1080 主画布。
 
-// 单位球半径 = ADM 距离 1；对象小球半径（世界单位）
-const OBJECT_RADIUS = 0.05;
+// 单位球半径 = ADM 距离 1；对象小球半径（世界单位）。
+// 相机为容纳房间外接球后移约 1.6 倍（见 ROOM_BOUND_FACTOR），小球半径同步放大，
+// 使对象在画面里的视角尺寸与可读性基本不变
+const OBJECT_RADIUS = 0.075;
 // 需完整入镜的包围球半径（单位球 + 光晕余量）
 const FIT_RADIUS = 1.25;
 // 相机方向：原点前左上方。方位角约 30°（偏画面左）、俯角约 20°，
@@ -26,6 +28,16 @@ const ROOM_HALF_W = 1.25; // x 半宽：5 格 × 0.5
 const ROOM_HALF_D = 1; // z 半深：4 格 × 0.5
 const GRID_COLS = 5;
 const GRID_ROWS = 4;
+
+// 房间外接球系数：fitCamera 按「包围球」取景，而基准盒半对角
+// sqrt(1.25² + 1² + 1²) ≈ 1.888 > FIT_RADIUS 1.25——取景半径若只覆盖 fitRadius，
+// 墙角必然落在保证入镜球之外（房间被裁切）。房间随 fitRadius 等比缩放，此比值恒定。
+const ROOM_HALF_H = (ROOM_TOP_Y - FLOOR_Y) / 2;
+const ROOM_BOUND_FACTOR =
+  Math.sqrt(ROOM_HALF_W * ROOM_HALF_W + ROOM_HALF_H * ROOM_HALF_H + ROOM_HALF_D * ROOM_HALF_D) /
+  FIT_RADIUS;
+// 外接球对盒子是保守上界（盒子轮廓小于外接球），再留 5% 呼吸空间
+const ROOM_FRAME_MARGIN = 1.05;
 
 type ObjectNode = {
   root: THREE.Mesh;
@@ -134,7 +146,7 @@ export class AtmosRenderer {
 
     // 原点听者标记：细环，标示听者位置；转平落在 XZ 平面（水平面），既不是音频对象也不是测距标尺
     const listener = new THREE.Mesh(
-      new THREE.TorusGeometry(0.05, 0.007, 8, 40),
+      new THREE.TorusGeometry(0.075, 0.0105, 8, 40),
       new THREE.MeshBasicMaterial({ color: 0x9fb0c4, transparent: true, opacity: 0.4, depthWrite: false }),
     );
     listener.rotation.x = -Math.PI / 2;
@@ -288,7 +300,9 @@ export class AtmosRenderer {
     this.camera.aspect = aspect;
     const halfV = (this.camera.fov * Math.PI) / 360;
     const halfH = Math.atan(Math.tan(halfV) * aspect);
-    const distance = this.fitRadius / Math.sin(Math.min(halfV, halfH));
+    // 取景半径 = fitRadius × 房间外接球系数 × 余量：房间线框必须完整入镜
+    const frameRadius = this.fitRadius * ROOM_BOUND_FACTOR * ROOM_FRAME_MARGIN;
+    const distance = frameRadius / Math.sin(Math.min(halfV, halfH));
     this.camera.position.copy(CAMERA_DIR).multiplyScalar(distance);
     this.camera.lookAt(CAMERA_TARGET);
     this.camera.updateProjectionMatrix();
