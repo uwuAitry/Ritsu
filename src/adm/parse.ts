@@ -1,7 +1,7 @@
 // ADM BWF 解析：BW64/RF64/RIFF 容器 → axml chunk → audioObject 摆位
 // 仅依赖 ../types，无外部依赖。
 
-import type { AdmMetadata, AdmObject } from "../types";
+import type { AdmKeyframe, AdmMetadata, AdmObject } from "../types";
 
 // ── 容器层 ──────────────────────────────────────────────
 
@@ -190,6 +190,32 @@ function toPolar(coords: Map<string, number>): {
   };
 }
 
+// 单个 audioBlockFormat 的摆位：position 坐标 → 极坐标 → 笛卡尔。
+// 无 position 元素时返回 null（调用方按“继承上一块”处理）。
+function readBlockPosition(block: Element): { x: number; y: number; z: number } | null {
+  const coords = new Map<string, number>();
+  for (const pos of findAll(block, "position")) {
+    const name = attr(pos, "coordinate");
+    if (!name) continue; // coordinate 属性必需
+    const v = Number(text(pos));
+    if (!Number.isFinite(v)) continue;
+    coords.set(name.toLowerCase(), v);
+  }
+  if (coords.size === 0) return null;
+  const { az, el, d } = toPolar(coords);
+  return polarToCartesian(az, el, d);
+}
+
+// rtime "HH:MM:SS(.fffff)" → 毫秒；无法解析返回 NaN。
+// ponytail: 不支持 ADM 的采样计数语法（...S<sampleRate>，如 00:00:01S48000）；
+// 真实 Dolby master 用 5 位小数的十进制秒，需要时再按采样率换算。
+export function parseRtime(s: string): number {
+  const m = /^(\d+):(\d+):(\d+)(?:\.(\d+))?$/.exec(s.trim());
+  if (!m) return NaN;
+  const fracMs = m[4] ? Math.round(Number("0." + m[4]) * 1000) : 0;
+  return ((Number(m[1]) * 60 + Number(m[2])) * 60 + Number(m[3])) * 1000 + fracMs;
+}
+
 function readGain(block: Element | null): number {
   const g = findFirst(block, "gain");
   if (!g) return 1.0;
@@ -227,7 +253,14 @@ export function parseAdmXml(xml: string, doc?: Document): AdmMetadata {
     if (id) channels.set(id, c);
   }
 
+  const trackUids = new Map<string, Element>();
+  for (const t of findAll(afx, "audioTrackUID")) {
+    const uid = attr(t, "UID"); // UID 为大写属性名
+    if (uid) trackUids.set(uid, t);
+  }
+
   const objects: AdmObject[] = [];
+  const idCounts = new Map<string, number>();
   let audioPackFormat: string | undefined;
 
   for (const obj of findAll(afx, "audioObject")) {
@@ -241,8 +274,13 @@ export function parseAdmXml(xml: string, doc?: Document): AdmMetadata {
       if (audioPackFormat === undefined) audioPackFormat = packId;
     }
 
-    let channelRef = text(findFirst(pack, "audioChannelFormatIDRef"));
+    // 权威绑定：audioObject → audioTrackUIDRef → audioTrackUID.UID → audioChannelFormatIDRef；
+    // 其次对象自身的 ref；最后退回 pack 的第一个 ref（兼容无 trackUID 链的文件）。
+    let channelRef = "";
+    const uidRef = text(findFirst(obj, "audioTrackUIDRef"));
+    if (uidRef) channelRef = text(findFirst(trackUids.get(uidRef) ?? null, "audioChannelFormatIDRef"));
     if (!channelRef) channelRef = text(findFirst(obj, "audioChannelFormatIDRef"));
+    if (!channelRef) channelRef = text(findFirst(pack, "audioChannelFormatIDRef"));
     const channel = channelRef ? channels.get(channelRef) ?? null : null;
 
     // 类型过滤
@@ -257,31 +295,61 @@ export function parseAdmXml(xml: string, doc?: Document): AdmMetadata {
       continue;
     }
 
-    // ponytail: 只取第一个 audioBlockFormat，块间插值暂不实现（v1 摆位为静态点）。
-    const block = findFirst(channel, "audioBlockFormat");
-
-    const coords = new Map<string, number>();
-    for (const pos of block ? findAll(block, "position") : []) {
-      const name = attr(pos, "coordinate");
-      if (!name) continue; // coordinate 属性必需
-      const v = Number(text(pos));
-      if (!Number.isFinite(v)) continue;
-      coords.set(name.toLowerCase(), v);
+    // 时间轴：解析该 channel 的全部 audioBlockFormat；无 position 的块继承上一块位置。
+    const frames: AdmKeyframe[] = [];
+    let px = 0;
+    let py = 0;
+    let pz = 0;
+    let firstBlock: Element | null = null;
+    for (const block of channel ? findAll(channel, "audioBlockFormat") : []) {
+      if (!firstBlock) firstBlock = block;
+      const rt = parseRtime(attr(block, "rtime") ?? "");
+      const pos = readBlockPosition(block);
+      let x = px;
+      let y = py;
+      let z = pz;
+      if (pos) {
+        x = pos.x;
+        y = pos.y;
+        z = pos.z;
+        px = x;
+        py = y;
+        pz = z;
+      }
+      frames.push({
+        timeMs: Number.isFinite(rt) ? rt : 0,
+        x,
+        y,
+        z,
+        jump: text(findFirst(block, "jumpPosition")) === "1",
+      });
     }
+    frames.sort((a, b) => a.timeMs - b.timeMs);
 
-    const { az, el, d } = toPolar(coords);
-    const cart = polarToCartesian(az, el, d);
+    // 静态字段取第一关键帧（无关键帧时全 0，与旧行为一致）
+    const head = frames[0];
+    const fx = head ? head.x : 0;
+    const fy = head ? head.y : 0;
+    const fz = head ? head.z : 0;
+    const az = (-Math.atan2(fx, fy) * 180) / Math.PI;
+    const el = (Math.atan2(fz, Math.hypot(fx, fy)) * 180) / Math.PI;
+    const d = Math.hypot(fx, fy, fz);
+
+    // 重复 audioObjectID 追加序号，避免 renderer 以 id 为 key 合并成同一节点
+    const n = idCounts.get(id) ?? 0;
+    idCounts.set(id, n + 1);
 
     objects.push({
-      id,
+      id: n > 0 ? `${id}#${n + 1}` : id,
       name: attr(obj, "audioObjectName") ?? attr(channel, "audioChannelFormatName") ?? id,
-      x: cart.x,
-      y: cart.y,
-      z: cart.z,
+      x: fx,
+      y: fy,
+      z: fz,
       azimuthDeg: az,
       elevationDeg: el,
       distance: d,
-      gain: readGain(block),
+      gain: readGain(firstBlock),
+      track: frames.length >= 2 ? frames : undefined,
     });
   }
 

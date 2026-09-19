@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import type { AdmObject } from "../types";
+import type { AdmKeyframe, AdmObject } from "../types";
 
 // AtmosRenderer：ADM 摆位 3D 视图。
 // 只拥有一个离屏 canvas（不挂载 DOM、不是 React 组件），由 compositor drawImage 到 1920×1080 主画布。
@@ -15,6 +15,7 @@ const CAMERA_TARGET = new THREE.Vector3(0, 0.05, 0);
 type ObjectNode = {
   root: THREE.Mesh;
   materials: THREE.Material[];
+  track?: AdmKeyframe[];
 };
 
 // id/name → 稳定色相；末乘黄金角，让相邻 id（AO_1001 / AO_1002）色相拉开
@@ -55,9 +56,14 @@ export class AtmosRenderer {
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
   private readonly nodes = new Map<string, ObjectNode>();
+  private readonly nodeList: ObjectNode[] = [];
   private readonly sphereGeometry: THREE.SphereGeometry;
   private readonly glowTexture: THREE.CanvasTexture;
   private timeMs = 0;
+  // 取景半径：按实际对象/关键帧范围计算，FIT_RADIUS 为下限
+  private fitRadius = FIT_RADIUS;
+  private viewW = 1;
+  private viewH = 1;
 
   constructor(width: number, height: number) {
     this.canvas = document.createElement("canvas");
@@ -92,6 +98,7 @@ export class AtmosRenderer {
         this.nodes.set(key, node);
         this.scene.add(node.root);
       }
+      node.track = obj.track;
       // ADM → Three：three.x = adm.x，three.y = adm.z（上），three.z = -adm.y（前方朝屏幕内）
       node.root.position.set(obj.x, obj.z, -obj.y);
     });
@@ -103,12 +110,75 @@ export class AtmosRenderer {
         this.nodes.delete(key);
       }
     }
+
+    // 取景半径覆盖所有对象的静态点与全部关键帧轨迹（角落对象 |p|=√3 不再出画）
+    let maxDist = 0;
+    for (let i = 0; i < objects.length; i += 1) {
+      const obj = objects[i];
+      const track = obj.track;
+      if (track) {
+        for (let k = 0; k < track.length; k += 1) {
+          const d = Math.hypot(
+            track[k].x - CAMERA_TARGET.x,
+            track[k].z - CAMERA_TARGET.y,
+            -track[k].y - CAMERA_TARGET.z,
+          );
+          if (d > maxDist) maxDist = d;
+        }
+      }
+      const d0 = Math.hypot(obj.x - CAMERA_TARGET.x, obj.z - CAMERA_TARGET.y, -obj.y - CAMERA_TARGET.z);
+      if (d0 > maxDist) maxDist = d0;
+    }
+    this.fitRadius = Math.max(FIT_RADIUS, maxDist + 0.25);
+    this.fitCamera(this.viewW, this.viewH);
+
+    // setTime 用索引扫描，避免每帧分配迭代器/闭包
+    this.nodeList.length = 0;
+    for (const node of this.nodes.values()) this.nodeList.push(node);
   }
 
   setTime(currentTimeMs: number): void {
-    // ponytail: v1 摆位静态（每个对象固定 x/y/z），时间只记录；
-    // 后续若随 audioBlockFormat 关键帧插值，在这里重算 node.root.position
+    if (currentTimeMs === this.timeMs) return;
     this.timeMs = currentTimeMs;
+    const nodes = this.nodeList;
+    for (let n = 0; n < nodes.length; n += 1) {
+      const node = nodes[n];
+      const track = node.track;
+      if (!track || track.length < 2) continue;
+      const first = track[0];
+      const last = track[track.length - 1];
+      let x: number;
+      let y: number;
+      let z: number;
+      if (currentTimeMs <= first.timeMs) {
+        x = first.x;
+        y = first.y;
+        z = first.z;
+      } else if (currentTimeMs >= last.timeMs) {
+        x = last.x;
+        y = last.y;
+        z = last.z;
+      } else {
+        // track[i-1].timeMs <= t < track[i].timeMs
+        let i = 1;
+        while (i < track.length && track[i].timeMs <= currentTimeMs) i += 1;
+        const a = track[i - 1];
+        const b = track[i];
+        if (b.jump) {
+          // jumpPosition=1：保持 a 的位置直到 b.timeMs 再瞬间切换
+          x = a.x;
+          y = a.y;
+          z = a.z;
+        } else {
+          const span = b.timeMs - a.timeMs;
+          const f = span > 0 ? (currentTimeMs - a.timeMs) / span : 1;
+          x = a.x + (b.x - a.x) * f;
+          y = a.y + (b.y - a.y) * f;
+          z = a.z + (b.z - a.z) * f;
+        }
+      }
+      node.root.position.set(x, z, -y);
+    }
   }
 
   render(): void {
@@ -116,24 +186,30 @@ export class AtmosRenderer {
   }
 
   resize(width: number, height: number): void {
+    this.viewW = width;
+    this.viewH = height;
     this.renderer.setSize(Math.max(width, 1), Math.max(height, 1), false);
     this.fitCamera(width, height);
   }
 
   dispose(): void {
-    // 场景里只有 Mesh（对象小球、听者环）和 Sprite（光晕）；无 Line/LineSegments 之类
+    // 对象节点：材质各自持有；球几何为所有节点共享，只释放一次
+    for (const node of this.nodes.values()) {
+      for (const m of node.materials) m.dispose();
+    }
+    this.sphereGeometry.dispose();
+    // 场景其余 Mesh（听者环等）：跳过共享球几何，避免重复 dispose
     this.scene.traverse((obj) => {
-      if (obj instanceof THREE.Mesh) {
+      if (obj instanceof THREE.Mesh && obj.geometry !== this.sphereGeometry) {
         obj.geometry.dispose();
         const material = obj.material;
         if (Array.isArray(material)) material.forEach((m) => m.dispose());
         else material.dispose();
-      } else if (obj instanceof THREE.Sprite) {
-        obj.material.dispose();
       }
     });
     this.glowTexture.dispose();
     this.nodes.clear();
+    this.nodeList.length = 0;
     this.renderer.dispose();
     // ponytail: 只释放 renderer；若频繁创建/销毁实例（浏览器 GL 上下文上限 ~16），再加 forceContextLoss()
   }
@@ -144,7 +220,7 @@ export class AtmosRenderer {
     this.camera.aspect = aspect;
     const halfV = (this.camera.fov * Math.PI) / 360;
     const halfH = Math.atan(Math.tan(halfV) * aspect);
-    const distance = FIT_RADIUS / Math.sin(Math.min(halfV, halfH));
+    const distance = this.fitRadius / Math.sin(Math.min(halfV, halfH));
     this.camera.position.copy(CAMERA_DIR).multiplyScalar(distance);
     this.camera.lookAt(CAMERA_TARGET);
     this.camera.updateProjectionMatrix();
