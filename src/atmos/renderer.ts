@@ -13,10 +13,13 @@ const FIT_RADIUS = 1.25;
 const CAMERA_DIR = new THREE.Vector3(-0.47, 0.342, 0.814).normalize();
 const CAMERA_TARGET = new THREE.Vector3(0, 0.05, 0);
 
-// 房间线框：地板格 + 背墙/右侧墙轮廓。钢蓝色细线，无填充/无背景，
-// 只为摆位视图提供“房间”参照，画布保持透明以便 alpha 合成与 captureStream 导出
-const ROOM_COLOR = 0x4a5a6a;
-const ROOM_LINE_OPACITY = 0.5;
+// 房间线框：地板格 + 背墙/右侧墙轮廓。提亮后的钢蓝色细线，无填充/无背景，
+// 只为摆位视图提供“房间”参照，画布保持透明以便 alpha 合成与 captureStream 导出。
+// 亮度刻意压在彩色对象之下（1px 细线 + 透明度），避免变成抢戏的“亮笼子”
+const ROOM_COLOR = 0x9fb3c8;
+const ROOM_LINE_OPACITY = 0.75;
+// 以下尺寸为 fitRadius === FIT_RADIUS 时的基准值；实际房间在 setObjects 里按
+// fitRadius / FIT_RADIUS 整体等比缩放，因此基准值不变也能随取景半径伸缩
 const FLOOR_Y = -1; // 单位球最低点，对象漂浮其上方
 const ROOM_TOP_Y = 1;
 const ROOM_HALF_W = 1.25; // x 半宽：5 格 × 0.5
@@ -110,6 +113,8 @@ export class AtmosRenderer {
   private readonly nodeList: ObjectNode[] = [];
   private readonly sphereGeometry: THREE.SphereGeometry;
   private readonly glowTexture: THREE.CanvasTexture;
+  // 房间线框：按基准尺寸建一次，之后靠 scale 跟随 fitRadius（几何无需重建）
+  private readonly room: THREE.LineSegments;
   private timeMs = 0;
   // 取景半径：按实际对象/关键帧范围计算，FIT_RADIUS 为下限
   private fitRadius = FIT_RADIUS;
@@ -135,8 +140,9 @@ export class AtmosRenderer {
     listener.rotation.x = -Math.PI / 2;
     this.scene.add(listener);
 
-    // 房间线框：给对象云一个地板与墙角参照
-    this.scene.add(makeRoom());
+    // 房间线框：给对象云一个地板与墙角参照；尺寸在 setObjects 里随 fitRadius 缩放
+    this.room = makeRoom();
+    this.scene.add(this.room);
 
     this.resize(width, height);
   }
@@ -184,6 +190,11 @@ export class AtmosRenderer {
       if (d0 > maxDist) maxDist = d0;
     }
     this.fitRadius = Math.max(FIT_RADIUS, maxDist + 0.25);
+    // 房间随 fitRadius 等比缩放：对象云越散、相机后撤多少，房间就放大多少，
+    // 于是任何取景半径下房间都保持同样的留白比例（fitRadius 已含 +0.25 光晕余量，
+    // 房间边角落在球外一点，仍在画面内且留有余裕）。
+    // 等比缩放同时让格子在屏幕上的疏密恒定，故 5×4 不再加密——加密会把它推向亮笼子
+    this.room.scale.setScalar(this.fitRadius / FIT_RADIUS);
     this.fitCamera(this.viewW, this.viewH);
 
     // setTime 用索引扫描，避免每帧分配迭代器/闭包
