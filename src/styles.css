@@ -362,6 +362,44 @@ input[type="file"]:disabled::file-selector-button {
   cursor: not-allowed;
 }
 
+/* 摆位显示：开关行 + 消失延迟输入 */
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: var(--fs-md);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.check-row input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.delay-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-sm);
+  color: var(--dim);
+}
+
+.delay-input {
+  width: 76px;
+  padding-block: 7px;
+}
+
+/* 数字输入的自旋按钮在深色玻璃上很突兀，隐藏 */
+.delay-input::-webkit-outer-spin-button,
+.delay-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 /* ── 播放 ─────────────────────────────────────────────── */
 
 .transport {

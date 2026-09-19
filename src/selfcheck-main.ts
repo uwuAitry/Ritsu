@@ -3,6 +3,7 @@
 import { runSelfCheck as checkAudio } from "./audio/selfcheck";
 import { runSelfCheck as checkAdm } from "./adm/selfcheck";
 import { runSelfCheck as checkLyricLayout } from "./render/selfcheck";
+import { runSelfCheck as checkAtmos } from "./atmos/selfcheck";
 
 // ponytail: lyric/load 的格式探测自检不在此运行。它经 ./lyric/load 顶层 import
 // @applemusic-like-lyrics/lyric（ESM-only 包），Node 20 的 CommonJS require()
@@ -17,3 +18,6 @@ checkAdm();
 console.log("selfcheck: adm ok");
 checkLyricLayout();
 console.log("selfcheck: lyric-layout ok");
+// atmos/selfcheck 只依赖 adm/parse 的 chunk 解析与 activity 纯逻辑，Node 安全。
+checkAtmos();
+console.log("selfcheck: atmos ok");

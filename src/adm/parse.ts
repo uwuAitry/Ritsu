@@ -228,7 +228,42 @@ function readGain(block: Element | null): number {
 
 // ── 主解析 ──────────────────────────────────────────────
 
-export function parseAdmXml(xml: string, doc?: Document): AdmMetadata {
+/** chna chunk（EBU Tech 3352）→ audioTrackUID ID → 0 基 WAV 声道号。
+ *  布局（小端）：ADMType u16 / numTrackUIDs u16 / numTracks u16 / numProgrammes u16，
+ *  每项 98 字节 = trackIndex u16 + UID / trackFormatRef / packFormatRef 各 32 字节定长串。
+ *  声明数量与实际大小不符时返回空 Map（调用方回落 trackIndex 属性），绝不抛错。 */
+export function parseChnaChunk(
+  buffer: ArrayBuffer,
+  offset: number,
+  size: number,
+): Map<string, number> {
+  const out = new Map<string, number>();
+  if (size < 8 || offset + size > buffer.byteLength) return out;
+  const dv = new DataView(buffer, offset, size);
+  const numTrackUids = dv.getUint16(2, true);
+  const numTracks = dv.getUint16(4, true);
+  const entrySize = 2 + 32 * 3; // trackIndex + 三个定长 ID 串
+  if (8 + numTrackUids * entrySize > size) return out;
+  for (let i = 0; i < numTrackUids; i++) {
+    const base = 8 + i * entrySize;
+    const trackIndex = dv.getUint16(base, true);
+    let uid = "";
+    for (let k = 0; k < 32; k++) {
+      const ch = dv.getUint8(base + 2 + k);
+      if (ch === 0) break;
+      uid += String.fromCharCode(ch);
+    }
+    // trackIndex 为 1 基 WAV 声道号；0 或超出 numTracks 的条目视为无效
+    if (uid && trackIndex >= 1 && trackIndex <= numTracks) out.set(uid, trackIndex - 1);
+  }
+  return out;
+}
+
+export function parseAdmXml(
+  xml: string,
+  doc?: Document,
+  chnaChannels?: ReadonlyMap<string, number>,
+): AdmMetadata {
   const docNode =
     doc ?? new DOMParser().parseFromString(xml, "application/xml");
   const root = docNode.documentElement;
@@ -282,6 +317,21 @@ export function parseAdmXml(xml: string, doc?: Document): AdmMetadata {
     if (!channelRef) channelRef = text(findFirst(obj, "audioChannelFormatIDRef"));
     if (!channelRef) channelRef = text(findFirst(pack, "audioChannelFormatIDRef"));
     const channel = channelRef ? channels.get(channelRef) ?? null : null;
+
+    // 声音来源声道：chna（权威）→ audioTrackUID@trackIndex → 未知（undefined = 视为始终发声）
+    let channelIndex: number | undefined;
+    if (uidRef) {
+      const viaChna = chnaChannels?.get(uidRef);
+      if (viaChna !== undefined) {
+        channelIndex = viaChna;
+      } else {
+        const ti = attr(trackUids.get(uidRef) ?? null, "trackIndex");
+        if (ti) {
+          const n = Number.parseInt(ti, 10) - 1;
+          if (Number.isInteger(n) && n >= 0) channelIndex = n;
+        }
+      }
+    }
 
     // 类型过滤
     if (
@@ -349,6 +399,7 @@ export function parseAdmXml(xml: string, doc?: Document): AdmMetadata {
       elevationDeg: el,
       distance: d,
       gain: readGain(firstBlock),
+      channelIndex,
       track: frames.length >= 2 ? frames : undefined,
     });
   }
@@ -360,7 +411,11 @@ export function parseAdmBwf(buffer: ArrayBuffer): AdmMetadata | null {
   try {
     const xml = extractAxmlChunk(buffer);
     if (!xml) return null;
-    return parseAdmXml(xml);
+    // chna：声道号 → audioTrackUID 的权威映射；缺失/截断 → undefined，绑定回落 trackIndex 属性
+    const walked = walkRiffChunks(buffer);
+    const chna = walked?.chunks.find((c) => c.id === "chna");
+    const chnaChannels = chna ? parseChnaChunk(buffer, chna.offset, chna.size) : undefined;
+    return parseAdmXml(xml, undefined, chnaChannels);
   } catch {
     return null;
   }

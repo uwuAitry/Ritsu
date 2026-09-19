@@ -1,5 +1,6 @@
 import * as THREE from "three";
-import type { AdmKeyframe, AdmObject } from "../types";
+import { ACTIVITY_WINDOW_MS, type AdmKeyframe, type AdmObject } from "../types";
+import { visibilityAt } from "./activity";
 
 // AtmosRenderer：ADM 摆位 3D 视图。
 // 只拥有一个离屏 canvas（不挂载 DOM、不是 React 组件），由 compositor drawImage 到 1920×1080 主画布。
@@ -43,6 +44,8 @@ type ObjectNode = {
   root: THREE.Mesh;
   materials: THREE.Material[];
   track?: AdmKeyframe[];
+  /** 发声活动位图（100ms/窗，随声道绑定取自解码期时间线）；null = 始终发声 */
+  activity: Uint8Array | null;
 };
 
 // id/name → 稳定色相；末乘黄金角，让相邻 id（AO_1001 / AO_1002）色相拉开
@@ -159,7 +162,11 @@ export class AtmosRenderer {
     this.resize(width, height);
   }
 
-  setObjects(objects: AdmObject[]): void {
+  // 活动门控：enabled=false 时所有节点保持可见（setActivityOptions 里复位一次）
+  private activityEnabled = false;
+  private activityDelayMs = 2000;
+
+  setObjects(objects: AdmObject[], channelActivity?: Uint8Array[] | null): void {
     const live = new Set<string>();
     objects.forEach((obj, i) => {
       const key = obj.id || obj.name || String(i);
@@ -171,6 +178,12 @@ export class AtmosRenderer {
         this.scene.add(node.root);
       }
       node.track = obj.track;
+      // 发声活动位图：按对象绑定的声道号取对应声道的时间线；未绑定/越界 → null（始终发声）
+      const bound =
+        obj.channelIndex !== undefined && channelActivity
+          ? channelActivity[obj.channelIndex]
+          : undefined;
+      node.activity = bound ?? null;
       // ADM → Three：three.x = adm.x，three.y = adm.z（上），three.z = -adm.y（前方朝屏幕内）
       node.root.position.set(obj.x, obj.z, -obj.y);
     });
@@ -220,6 +233,8 @@ export class AtmosRenderer {
     const nodes = this.nodeList;
     for (let n = 0; n < nodes.length; n += 1) {
       const node = nodes[n];
+      // 活动门控对全部节点生效（含无轨迹的静态对象），置于轨迹处理之前
+      if (this.activityEnabled) this.applyActivity(node, currentTimeMs);
       const track = node.track;
       if (!track || track.length < 2) continue;
       const first = track[0];
@@ -256,6 +271,29 @@ export class AtmosRenderer {
       }
       node.root.position.set(x, z, -y);
     }
+  }
+
+  /** 活动门控开关与消失延迟。关闭时立即把所有节点复位为可见，等价于功能 no-op。 */
+  setActivityOptions(opts: { enabled?: boolean; delayMs?: number }): void {
+    if (opts.enabled !== undefined) this.activityEnabled = opts.enabled;
+    if (opts.delayMs !== undefined && opts.delayMs >= 0) this.activityDelayMs = opts.delayMs;
+    if (!this.activityEnabled) {
+      for (const node of this.nodes.values()) this.applyVisibility(node, 1);
+    }
+  }
+
+  // 每帧门控：查可见度 → 直接写透明度与 visible（节点数少，逐帧写无压力）
+  private applyActivity(node: ObjectNode, tMs: number): void {
+    const v = visibilityAt(node.activity, tMs, this.activityDelayMs, ACTIVITY_WINDOW_MS);
+    this.applyVisibility(node, v);
+  }
+
+  private applyVisibility(node: ObjectNode, v: number): void {
+    node.root.visible = v > 0.001;
+    const body = node.materials[0] as THREE.MeshBasicMaterial;
+    const halo = node.materials[1] as THREE.SpriteMaterial;
+    body.opacity = v;
+    halo.opacity = 0.5 * v;
   }
 
   render(): void {
@@ -311,7 +349,8 @@ export class AtmosRenderer {
   private createNode(key: string): ObjectNode {
     // 高饱和 + 中低明度：相邻对象单凭色相就能分辨，加色光晕也不会把本色洗成白
     const color = new THREE.Color().setHSL(hueFromKey(key) / 360, 0.85, 0.58);
-    const body = new THREE.MeshBasicMaterial({ color });
+    // transparent 常开：活动门控逐帧改 opacity（=1 时外观与不透明一致）
+    const body = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1 });
     const halo = new THREE.SpriteMaterial({
       map: this.glowTexture,
       color,
@@ -326,6 +365,6 @@ export class AtmosRenderer {
     sprite.scale.setScalar(OBJECT_RADIUS * 4.5);
     sprite.renderOrder = 1;
     root.add(sprite);
-    return { root, materials: [body, halo] };
+    return { root, materials: [body, halo], activity: null };
   }
 }

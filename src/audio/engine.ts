@@ -47,7 +47,11 @@ export class AudioEngine {
   }
 
   // 可重复调用：先拆掉旧的 source / 状态，再解码新文件
-  async load(file: File): Promise<{ source: AudioSource; adm: AdmMetadata | null }> {
+  async load(file: File): Promise<{
+    source: AudioSource;
+    adm: AdmMetadata | null;
+    activity: Uint8Array[] | null;
+  }> {
     this.stopSource();
     this.buffer = null;
     this.startOffset = 0;

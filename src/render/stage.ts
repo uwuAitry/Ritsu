@@ -135,9 +135,14 @@ export class StageRenderer {
     this.lines = lines;
   }
 
-  setAdm(meta: AdmMetadata | null): void {
+  setAdm(meta: AdmMetadata | null, channelActivity?: Uint8Array[] | null): void {
     this.adm = meta;
-    this.atmos.setObjects(meta ? meta.objects : []);
+    this.atmos.setObjects(meta ? meta.objects : [], channelActivity);
+  }
+
+  /** 摆位对象活动门控：开关 + 消失延迟（透传 atmos；重绘由调用方负责） */
+  setActivityOptions(opts: { enabled?: boolean; delayMs?: number }): void {
+    this.atmos.setActivityOptions(opts);
   }
 
   setMeta(meta: StageMeta): void {

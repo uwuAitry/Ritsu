@@ -1,7 +1,7 @@
 // 音频文件读取与解码
 import type { AudioSource, AdmMetadata } from "../types";
 import { parseAdmBwf } from "../adm/parse";
-import { readWavInfo, decodeWavToStereo } from "./wav";
+import { readWavInfo, decodeWavToStereo, activityWindowCount } from "./wav";
 import { downmixToStereo } from "./downmix";
 
 // 解码音频并组装 AudioSource。
@@ -10,24 +10,31 @@ import { downmixToStereo } from "./downmix";
 export async function decodeAudioFile(
   ctx: BaseAudioContext,
   file: File,
-): Promise<{ source: AudioSource; adm: AdmMetadata | null }> {
+): Promise<{ source: AudioSource; adm: AdmMetadata | null; activity: Uint8Array[] | null }> {
   const raw = await file.arrayBuffer();
 
   // ADM BWF 是未压缩多声道 PCM，浏览器 decodeAudioData 常拒绝 → 自行解 WAV。
   let decoded: AudioBuffer;
   let originalChannels: number;
+  // 逐声道发声活动时间线：仅自研 PCM 路径产出。decodeAudioData 兜底路径不分析——
+  // ponytail: ADM BWF 恒为 PCM，兜底路径不会出现 ADM 对象，活动门控对它自然 no-op
+  let activity: Uint8Array[] | null = null;
   const info = readWavInfo(raw);
   if (info && info.frameCount > 0) {
     try {
       // 直接建 2 声道输出，解码+降混一次写入，不物化 12 声道中间缓冲。
       const out = ctx.createBuffer(2, info.frameCount, info.sampleRate);
-      decodeWavToStereo(raw, info, out.getChannelData(0), out.getChannelData(1));
+      activity = Array.from({ length: info.channelCount }, () =>
+        new Uint8Array(activityWindowCount(info.frameCount, info.sampleRate)),
+      );
+      decodeWavToStereo(raw, info, out.getChannelData(0), out.getChannelData(1), activity);
       decoded = out;
       originalChannels = info.channelCount;
     } catch {
       // 手动构建失败（如 0 帧）则回退原生解码
       decoded = await ctx.decodeAudioData(raw.slice(0));
       originalChannels = decoded.numberOfChannels;
+      activity = null;
     }
   } else {
     // slice(0)：decodeAudioData 会 detach 传入的 ArrayBuffer，保留 raw 原样可用
@@ -50,5 +57,5 @@ export async function decodeAudioFile(
     isAdm: adm !== null,
   };
 
-  return { source, adm };
+  return { source, adm, activity };
 }

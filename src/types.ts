@@ -1,5 +1,9 @@
 // Ritsu 共享类型契约（供各功能模块引用）
 
+// 对象发声活动时间线的时间分辨率（100ms 一窗）：解码时逐声道累计 RMS 产出，
+// wav.ts（生产）与 atmos/activity.ts（消费）共用，防止两侧窗长漂移
+export const ACTIVITY_WINDOW_MS = 100;
+
 // ADM audioBlockFormat 关键帧（时间轴上的一个摆位点）
 export interface AdmKeyframe {
   timeMs: number;
@@ -23,6 +27,9 @@ export interface AdmObject {
   elevationDeg: number;
   distance: number;
   gain: number;
+  /** 声音来源的 WAV 声道号（0 基）：由 chna chunk（权威）或 audioTrackUID@trackIndex 推导。
+   *  缺省 = 绑定未知，该对象视为始终发声（活动门控对它 no-op） */
+  channelIndex?: number;
   /** 摆位时间轴，按 timeMs 升序；缺省或长度 < 2 表示静态摆位 */
   track?: AdmKeyframe[];
 }

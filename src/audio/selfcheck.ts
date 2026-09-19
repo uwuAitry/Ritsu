@@ -2,7 +2,7 @@
 // 运行方式（浏览器控制台 / Node>=18）：
 //   import { runSelfCheck } from "./src/audio/selfcheck"; runSelfCheck();
 
-import { readWavInfo, decodeWavToStereo } from "./wav";
+import { readWavInfo, decodeWavToStereo, activityWindowCount } from "./wav";
 
 function assert(cond: boolean, msg: string): void {
   if (!cond) throw new Error("audio selfcheck failed: " + msg);
@@ -205,6 +205,35 @@ export function runSelfCheck(): void {
   assert(approx(pl[0], 0.99), "peak guard L");
   assert(approx(pr[0], 0.99), "peak guard R");
   assert(pl[0] === pr[0], "peak guard shared factor");
+
+  // 活动时间线：8kHz 立体声 1600 帧 = 2 窗（800 帧/窗）。
+  // ch0 前 800 帧 ±0.5（rms 0.5 → 活动），后 800 帧静音；ch1 全程静音。
+  const actData: number[] = [];
+  for (let f = 0; f < 1600; f++) {
+    const l = f < 800 ? 0x4000 : 0x0000; // 16-bit LE：0x4000 = 0.5
+    actData.push(l & 0xff, (l >>> 8) & 0xff, 0x00, 0x00);
+  }
+  const act = buildWav(
+    { audioFormat: 1, channelCount: 2, sampleRate: 8000, bitsPerSample: 16 },
+    actData,
+  );
+  const ai = readWavInfo(act);
+  assert(ai !== null, "activity wav not parsed");
+  const winCount = activityWindowCount(ai!.frameCount, ai!.sampleRate);
+  assert(winCount === 2, "activity window count");
+  const a0 = new Uint8Array(winCount);
+  const a1 = new Uint8Array(winCount);
+  const al = new Float32Array(ai!.frameCount);
+  const ar = new Float32Array(ai!.frameCount);
+  decodeWavToStereo(act, ai!, al, ar, [a0, a1]);
+  assert(a0[0] === 1, "activity ch0 win0 loud");
+  assert(a0[1] === 0, "activity ch0 win1 silent");
+  assert(a1[0] === 0 && a1[1] === 0, "activity ch1 all silent");
+  // 不传 activityOut 时完全不影响解码结果
+  const l2 = new Float32Array(8);
+  const r2 = new Float32Array(8);
+  decodeWavToStereo(act, ai!, l2, r2);
+  assert(approx(l2[0], 0.5), "activity-off decode unaffected");
 
   // 非 WAV → null
   assert(

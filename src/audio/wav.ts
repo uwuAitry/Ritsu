@@ -4,6 +4,7 @@
 // 声道角色感知降混直写调用方立体声数组，必要时整体限峰。
 // 复用 ../adm/parse 的容器遍历（含 RF64/BW64 ds64 覆盖），不重复实现。
 import { walkRiffChunks } from "../adm/parse";
+import { ACTIVITY_WINDOW_MS } from "../types";
 
 export interface WavInfo {
   channelCount: number;
@@ -17,6 +18,16 @@ export interface WavInfo {
   isFloat: boolean;
   /** dwChannelMask（WAVE_FORMAT_EXTENSIBLE）；0 = 未知/非 extensible。 */
   channelMask: number;
+}
+
+// 对象活动检测：窗内 RMS 高于此值（≈ -60 dBFS）记为「发声」。
+// 内部常数不暴露 UI——母带里数字静音与可闻声之间隔得很开。
+const ACTIVITY_RMS_THRESHOLD = 0.001;
+
+/** 活动时间线的窗数：ceil(frameCount / 每窗帧数)；与 decodeWavToStereo 的分段严格一致 */
+export function activityWindowCount(frameCount: number, sampleRate: number): number {
+  const framesPerWindow = Math.max(1, Math.round((sampleRate * ACTIVITY_WINDOW_MS) / 1000));
+  return Math.max(1, Math.ceil(frameCount / framesPerWindow));
 }
 
 const FORMAT_PCM = 1;
@@ -150,12 +161,15 @@ function assignChannelGains(
   }
 }
 
-/** 单遍解码 + 声道角色降混直写调用方立体声数组；仅写 [0, info.frameCount)。 */
+/** 单遍解码 + 声道角色降混直写调用方立体声数组；仅写 [0, info.frameCount)。
+ *  activityOut 提供时（每声道一个窗位图，长度 = activityWindowCount），在同一次循环里
+ *  逐声道累计 RMS、按 100ms 窗写 0/1——不物化多声道缓冲，也不跑第二遍。 */
 export function decodeWavToStereo(
   buffer: ArrayBuffer,
   info: WavInfo,
   left: Float32Array,
   right: Float32Array,
+  activityOut?: Uint8Array[],
 ): void {
   const { dataOffset, blockAlign, channelCount, frameCount, channelMask } = info;
   const { bitsPerSample, validBits, isFloat } = info;
@@ -185,6 +199,25 @@ export function decodeWavToStereo(
   const dv = new DataView(buffer);
   const bytesPerSample = bitsPerSample / 8;
   const shift = bitsPerSample - validBits;
+
+  // 活动检测累加器：逐声道能量平方和，每 100ms 窗 finalize 一次（不需要时零开销）
+  const framesPerWindow = Math.max(1, Math.round((info.sampleRate * ACTIVITY_WINDOW_MS) / 1000));
+  const sumSq = activityOut ? new Float64Array(channelCount) : null;
+  let windowStart = 0;
+  let windowIndex = 0;
+  const flushWindow = (endFrame: number): void => {
+    if (!activityOut || !sumSq) return;
+    const frames = Math.max(1, endFrame - windowStart);
+    for (let c = 0; c < channelCount; c++) {
+      const slots = activityOut[c];
+      if (slots && windowIndex < slots.length) {
+        slots[windowIndex] = Math.sqrt(sumSq[c] / frames) > ACTIVITY_RMS_THRESHOLD ? 1 : 0;
+      }
+      sumSq[c] = 0;
+    }
+    windowIndex += 1;
+    windowStart = endFrame;
+  };
   const divisor =
     bitsPerSample === 16
       ? 32768
@@ -218,12 +251,16 @@ export function decodeWavToStereo(
         if (shift > 0) n >>= shift;
         s = n / divisor;
       }
+      if (sumSq) sumSq[c] += s * s;
       sumL += s * gainL[c];
       sumR += s * gainR[c];
     }
     left[f] = sumL;
     right[f] = sumR;
+    if (sumSq && f + 1 - windowStart >= framesPerWindow) flushWindow(f + 1);
   }
+  // 末窗不足 100ms 也照常 finalize（部分窗按实际帧数取 RMS）
+  if (sumSq && frameCount > windowStart) flushWindow(frameCount);
 
   // 0.7071 系数下多声道可叠加超过 1.0，硬削波会毁掉导出画面 → 整体限峰。
   // ponytail: 单一全局系数而非分块限制器，一处瞬态会压低全曲。

@@ -74,6 +74,9 @@ export default function App() {
   // 歌曲信息：metaInput 是输入框原值（可为空串），metaDefault 是文件名推导值
   const [metaInput, setMetaInput] = useState<StageMeta>({ title: "", artist: "" });
   const [metaDefault, setMetaDefault] = useState<StageMeta>({ title: "", artist: "" });
+  // 摆位显示：隐藏未发声对象 + 消失延迟（秒）
+  const [hideSilent, setHideSilent] = useState(false);
+  const [silentDelaySec, setSilentDelaySec] = useState(2);
 
   // 引擎 / 舞台在挂载时创建、卸载时销毁。StrictMode 的模拟卸载走同一条清理路径，
   // 重新挂载即重建 —— 不在 render 里 new，避免被双调用泄漏 AudioContext / WebGL context。
@@ -146,7 +149,8 @@ export default function App() {
       stage.setDuration(loaded.source.durationSec * 1000);
 
       const admMeta: AdmMetadata | null = loaded.source.isAdm ? loaded.adm : null;
-      stage.setAdm(admMeta);
+      // 逐声道活动时间线随 ADM 下发；对象按声道绑定（chna / trackIndex）在渲染器内取用
+      stage.setAdm(admMeta, admMeta ? loaded.activity : null);
 
       setSource(loaded.source);
       setAdm(admMeta);
@@ -170,6 +174,18 @@ export default function App() {
     if (!stage) return;
     stage.setMeta(resolveMeta(next, metaDefault));
     stage.render();
+  };
+
+  // 摆位显示开关：同步渲染器选项并补一帧（暂停时没有 tick）
+  const updateActivity = (patch: { hideSilent?: boolean; silentDelaySec?: number }): void => {
+    const nextHide = patch.hideSilent ?? hideSilent;
+    const nextDelay = patch.silentDelaySec ?? silentDelaySec;
+    setHideSilent(nextHide);
+    setSilentDelaySec(nextDelay);
+    const stage = stageRef.current;
+    if (!stage) return;
+    stage.setActivityOptions({ enabled: nextHide, delayMs: nextDelay * 1000 });
+    syncStage();
   };
 
   const handleLyric = async (file: File): Promise<void> => {
@@ -402,6 +418,39 @@ export default function App() {
               </label>
             </div>
           </section>
+
+          {adm ? (
+            <section className="panel-block">
+              <h2 className="block-title">摆位显示</h2>
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={hideSilent}
+                  onChange={(e) => updateActivity({ hideSilent: e.target.checked })}
+                />
+                <span>隐藏未发声对象</span>
+              </label>
+              <label className="delay-row">
+                <span>消失延迟</span>
+                <input
+                  className="text-input delay-input"
+                  type="number"
+                  min={0}
+                  max={30}
+                  step={0.5}
+                  value={silentDelaySec}
+                  disabled={!hideSilent || locked}
+                  aria-label="消失延迟秒数"
+                  onChange={(e) => {
+                    const v = e.target.valueAsNumber;
+                    if (Number.isFinite(v)) updateActivity({ silentDelaySec: v });
+                  }}
+                />
+                <span>秒</span>
+              </label>
+              <p className="hint">对象停止发声超过延迟后从摆位图淡出，重新发声立即恢复。</p>
+            </section>
+          ) : null}
 
           <section className="panel-block">
             <h2 className="block-title">播放</h2>
