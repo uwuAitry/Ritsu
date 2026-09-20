@@ -12,7 +12,8 @@ Ritsu：把歌词渲染成 Apple Music 风格视频的网页应用。**在线预
 - 歌词 / 背景：`@applemusic-like-lyrics/{core,react,lyric}`（底层 PixiJS **v7** 渲染）
 - 3D 摆位：Three.js
 - 音频：Web Audio API
-- 导出：MediaRecorder / `canvas.captureStream()`（原生，不引入重型编码库）
+- 导出：实时走 MediaRecorder / `canvas.captureStream()`（原生）；离线走 WebCodecs（H.264 + AAC）逐帧编码
+- MP4 封装：`mp4-muxer`（MIT、~15KB、零依赖）。理由：WebCodecs 只产裸编码块，浏览器无原生 MP4 封装 API，MediaRecorder 时间戳走墙钟无法离线。`ponytail:` 官方已转向继任者 Mediabunny，需要更强封装能力时再迁移
 - 许可：**AGPL-3.0**（AMLL 为强 copyleft，本项目保持 AGPL-3.0 兼容）
 
 ## 目录结构
@@ -28,7 +29,7 @@ src/
   lyric/            歌词加载 + AMLL LyricLine 转换
   render/           视觉场景（封面 / 歌词 / 流体背景 / 徽标 / 进度）
   atmos/            Three.js 空间摆位透视图
-  export/           视频导出
+  export/           视频导出（实时录制 + 离线逐帧）
 .github/workflows/  CI（构建 + 产物 + 部署）
 ```
 
@@ -54,12 +55,11 @@ src/
 - [ ] 双模式输入：普通立体声 + ADM BWF
 - [ ] 歌词格式：LRC / YRC / QRC / Lyricify（`@applemusic-like-lyrics/lyric` 实测含 TTML）
 - [ ] 封面：内嵌标签优先，手动上传兜底
+- [ ] 离线逐帧渲染导出（自定义分辨率 / 帧率，WebCodecs + mp4-muxer）
 
 ## 后续愿景（v1 不做，避免提前实现）
 
 - 真正 binaural / 对象式 Atmos 渲染（WASM）
-- 离线加速渲染（比实时快）
-- 4K / 60fps 导出
 - i18n 文案切换
 
 ## 工程约束（ponytail）
@@ -75,3 +75,4 @@ src/
 - 实时导出：**播放时长 = 导出时长**；导出走 `canvas.captureStream()` 抓画面 + Web Audio destination stream 抓声音。
 - MediaRecorder 优先 MP4(H.264)；浏览器不支持时降级 WebM(VP9)。
 - 空间摆位图只读 ADM 元数据，**不触碰音频解码**；音频实际播放简单 downmix（`ponytail:` 标记，后续可升级均衡 downmix）。
+- 离线导出：逐帧渲染（t = i/fps）+ WebCodecs 编码 + mp4-muxer 封装 MP4，**导出耗时不再等于播放时长**；非 16:9 的目标分辨率等比缩放居中留黑边，不拉伸；无 WebCodecs 的浏览器回退实时录制。

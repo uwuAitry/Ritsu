@@ -72,6 +72,11 @@ export class StageRenderer {
   private readonly ctx: CanvasRenderingContext2D;
   private readonly atmos: AtmosRenderer;
 
+  // 输出尺寸 / 缩放：canvas = 请求的输出分辨率（预览为 1920×1080），布局坐标不变。
+  // 等比 s = min(outW/1920, outH/1080) 后居中：非 16:9 的目标分辨率留黑边，不拉伸变形。
+  private readonly scale: number;
+  private readonly offsetX: number;
+  private readonly offsetY: number;
   private cover: CoverSource | null = null;
   private lines: LyricLine[] = [];
   private adm: AdmMetadata | null = null;
@@ -100,19 +105,28 @@ export class StageRenderer {
   private roundRectFn: RoundRectFn | null = null;
   private roundRectResolved = false;
 
-  constructor() {
+  constructor(width = W, height = H) {
+    // 输出尺寸默认 1920×1080（预览）；离线导出传目标分辨率。
+    // 布局坐标一律不变：整幅按等比 s 放大后居中，非 16:9 的目标分辨率留黑边而非拉伸。
+    // 阴影 / filter 等不随 transform 缩放的属性在各自绘制处显式乘 s。
+    // 画布取偶：H.264 yuv420 要求宽高为偶（预览 1920×1080 本身为偶，不受影响）
+    const outW = Math.max(2, Math.round(width) & ~1);
+    const outH = Math.max(2, Math.round(height) & ~1);
+    this.scale = Math.min(outW / W, outH / H);
+    this.offsetX = (outW - W * this.scale) / 2;
+    this.offsetY = (outH - H * this.scale) / 2;
     this.canvas = document.createElement("canvas");
-    this.canvas.width = W;
-    this.canvas.height = H;
+    this.canvas.width = outW;
+    this.canvas.height = outH;
     const ctx = this.canvas.getContext("2d");
     if (!ctx) throw new Error("StageRenderer: 2D canvas context unavailable");
     this.ctx = ctx;
 
     this.bgCanvas = document.createElement("canvas");
-    this.bgCanvas.width = W;
-    this.bgCanvas.height = H;
+    this.bgCanvas.width = outW;
+    this.bgCanvas.height = outH;
 
-    this.atmos = new AtmosRenderer(ATMOS_W, ATMOS_H);
+    this.atmos = new AtmosRenderer(Math.round(ATMOS_W * this.scale), Math.round(ATMOS_H * this.scale));
 
     this.darkGradient = ctx.createLinearGradient(0, 0, 0, H);
     this.darkGradient.addColorStop(0, "#1a1a1f");
@@ -166,6 +180,15 @@ export class StageRenderer {
 
   render(): void {
     const ctx = this.ctx;
+    // 留边时先按设备像素铺黑底：非 16:9 目标分辨率的黑边，
+    // 同时保证 H.264（无 alpha）对应的像素是黑而不是透明。
+    if (this.offsetX !== 0 || this.offsetY !== 0) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+    // 整幅布局坐标等比放大并居中；阴影 / filter 类不随 transform 缩放的属性单独处理
+    ctx.setTransform(this.scale, 0, 0, this.scale, this.offsetX, this.offsetY);
     const timeMs = this.timeMs;
 
     // 背景栈：流体/模糊底 → 统一压暗的 scrim → 封面/歌词/空间面板/徽标/信息条
@@ -187,7 +210,7 @@ export class StageRenderer {
       idx >= 0 ? this.lines[idx] : null,
       timeMs,
       { x: 110, y: 830, maxWidth: 900 },
-      { progress },
+      { progress, scale: this.scale },
     );
 
     this.drawAtmosPanel(ctx);
@@ -217,6 +240,7 @@ export class StageRenderer {
 
     const bg = this.findBgCanvas();
     if (bg) {
+      // ponytail: AMLL 流体背景画布固定 1920×1080，输出更高分辨率时这里是放大（源就这么大）
       ctx.drawImage(bg, 0, 0, W, H);
       ctx.restore();
       return;
@@ -224,7 +248,8 @@ export class StageRenderer {
 
     const cover = this.cover;
     if (cover && this.coverReady(cover)) {
-      ctx.filter = "blur(80px)";
+      // filter 不随 transform 缩放（按设备像素生效）→ 半径显式乘 scale
+      ctx.filter = `blur(${80 * this.scale}px)`;
       ctx.drawImage(cover, -60, -60, W + 120, H + 120);
       ctx.restore();
       return;
@@ -246,8 +271,9 @@ export class StageRenderer {
     // 阴影 + 底：无封面时这里就是最终外观
     ctx.save();
     ctx.shadowColor = "rgba(0,0,0,0.5)";
-    ctx.shadowBlur = 40;
-    ctx.shadowOffsetY = 18;
+    // 阴影按设备像素生效、不随 transform 缩放 → blur / offset 显式乘 scale
+    ctx.shadowBlur = 40 * this.scale;
+    ctx.shadowOffsetY = 18 * this.scale;
     ctx.fillStyle = ready ? "#000000" : "rgba(255,255,255,0.10)";
     ctx.beginPath();
     this.roundRectPath(x, y, size, size, radius);
@@ -307,7 +333,7 @@ export class StageRenderer {
   // 关键：在这里就降到 drawBadge 实际使用的尺寸，让最终 drawImage 变成 1:1。
   // 若保留原始 665×95 再在 drawBadge 缩到 220 宽，等于每帧走一次 3× 低质缩放 → 徽标发糊。
   private bakeBadge(img: HTMLImageElement): void {
-    const w = BADGE_W;
+    const w = Math.max(1, Math.round(BADGE_W * this.scale));
     // 与 drawBadge 的 h = BADGE_W * (h / w) 同一套比例，烘焙后公式依旧成立
     const h = Math.round(w * (img.naturalHeight / img.naturalWidth));
     if (img.naturalWidth === 0 || img.naturalHeight === 0 || h === 0) return;

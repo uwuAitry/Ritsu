@@ -34,6 +34,11 @@ export class AudioEngine {
     return this.buffer ? this.buffer.duration : 0;
   }
 
+  /** 已解码音频缓冲（只读）：离线导出直接取用，避免二次解码 */
+  get decodedBuffer(): AudioBuffer | null {
+    return this.buffer;
+  }
+
   get currentTime(): number {
     const t =
       this.state_ === "playing"

@@ -8,6 +8,7 @@ import "@applemusic-like-lyrics/core/style.css";
 
 import { AudioEngine } from "./audio/engine";
 import { exportVideo, pickMimeType } from "./export/recorder";
+import { exportOfflineRender, isOfflineRenderSupported } from "./export/offline";
 import { loadLyricFile } from "./lyric/load";
 import { StageRenderer } from "./render/stage";
 import type { StageMeta } from "./render/stage";
@@ -16,6 +17,20 @@ import type { AdmMetadata, AudioSource } from "./types";
 const AUDIO_ACCEPT = "audio/*,.wav,.bwf,.rf64,.flac,.mp3,.m4a,.aac,.ogg";
 const LYRIC_ACCEPT = ".lrc,.yrc,.qrc,.lys,.lyl,.lqe,.ttml,.xml,.txt";
 const COVER_ACCEPT = "image/*";
+
+// 离线渲染分辨率预设（16:9）+ 帧率档位；选「自定义」时宽高可编辑
+const RESOLUTION_PRESETS = [
+  { id: "1080p", label: "1080p · 1920×1080", width: 1920, height: 1080 },
+  { id: "1440p", label: "1440p · 2560×1440", width: 2560, height: 1440 },
+  { id: "4k", label: "4K · 3840×2160", width: 3840, height: 2160 },
+] as const;
+const FPS_CHOICES = [24, 30, 60];
+
+// 输出宽高就近取偶并夹进可编码范围：H.264 yuv420 要求偶数，NaN / 过小归到下限
+function snapEvenSize(v: number): number {
+  if (!Number.isFinite(v)) return 2;
+  return Math.min(7680, Math.max(2, Math.round(v) & ~1));
+}
 
 function formatTime(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -69,6 +84,16 @@ export default function App() {
   const [timeMs, setTimeMs] = useState(0);
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
+  // 导出模式与离线参数：realtime = 原实时录制路径，offline = 逐帧编码（WebCodecs + mp4-muxer）
+  const [exportMode, setExportMode] = useState<"realtime" | "offline">("realtime");
+  const [resPreset, setResPreset] = useState("1080p");
+  const [outWidth, setOutWidth] = useState(1920);
+  const [outHeight, setOutHeight] = useState(1080);
+  const [outFps, setOutFps] = useState(30);
+  // 离线渲染的取消句柄
+  const abortRef = useRef<AbortController | null>(null);
+  // ADM 逐声道活动时间线：预览与离线导出共用（离线舞台需要同一份数据才能画出同样的摆位）
+  const admActivityRef = useRef<Uint8Array[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // 歌曲信息：metaInput 是输入框原值（可为空串），metaDefault 是文件名推导值
@@ -150,7 +175,8 @@ export default function App() {
 
       const admMeta: AdmMetadata | null = loaded.source.isAdm ? loaded.adm : null;
       // 逐声道活动时间线随 ADM 下发；对象按声道绑定（chna / trackIndex）在渲染器内取用
-      stage.setAdm(admMeta, admMeta ? loaded.activity : null);
+      admActivityRef.current = admMeta ? loaded.activity : null;
+      stage.setAdm(admMeta, admActivityRef.current);
 
       setSource(loaded.source);
       setAdm(admMeta);
@@ -241,12 +267,80 @@ export default function App() {
     else engine.play();
   };
 
+  // 离线逐帧导出：不播放、不等实时。画面走独立 StageRenderer（与预览同一帧路径），
+  // 音频取解码缓冲 → OfflineAudioContext 下混立体声 → WebCodecs 编码 → mp4-muxer 封 MP4。
+  const exportOffline = async (): Promise<void> => {
+    const engine = engineRef.current;
+    if (!engine || !source) return;
+    const buffer = engine.decodedBuffer;
+    if (!buffer) {
+      setError("音频缓冲尚未就绪，无法离线渲染");
+      return;
+    }
+
+    const width = snapEvenSize(outWidth);
+    const height = snapEvenSize(outHeight);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setError(null);
+    setExporting(true);
+    setExportProgress(0);
+    engine.pause(); // 离线不驱动播放时钟；避免播放与渲染争抢 CPU
+
+    // 独立舞台实例：装上与预览一致的状态，但尺寸为目标分辨率（scale 参数化），不干扰预览画布
+    const offStage = new StageRenderer(width, height);
+    offStage.setCover(coverImg);
+    offStage.setLyricLines(lines);
+    offStage.setMeta(resolveMeta(metaInput, metaDefault));
+    offStage.setDuration((engine.duration || source.durationSec) * 1000);
+    offStage.setAdm(adm, adm ? admActivityRef.current : null);
+    offStage.setActivityOptions({ enabled: hideSilent, delayMs: silentDelaySec * 1000 });
+    // bgCanvas 挂进预览的流体背景宿主：StageRenderer 靠 parentElement 里的 canvas 找到 AMLL
+    // 流体背景（宿主是空的 React 节点，追加的 canvas 不会被 React 回收）。
+    // ponytail: AMLL 流体画布由 AMLL 自身按真实时间驱动、无法按时间轴重放，离线导出里它只按
+    // 渲染墙钟推进，与音乐的对应关系是近似的；要精确重放需改为由时间轴驱动的背景。
+    bgHostRef.current?.appendChild(offStage.bgCanvas);
+
+    try {
+      const blob = await exportOfflineRender({
+        canvas: offStage.canvas,
+        buffer,
+        fps: outFps,
+        renderFrame: (t) => {
+          offStage.setTime(t);
+          offStage.render();
+        },
+        onProgress: setExportProgress,
+        signal: controller.signal,
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${baseName(source.fileName)}.mp4`;
+      a.click();
+      // ponytail: 延迟回收；立刻 revoke 在部分浏览器会打断下载
+      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+    } catch (e) {
+      if ((e as Error).name === "AbortError") setError("离线渲染已取消");
+      else setError(`离线渲染失败：${errText(e)}`);
+    } finally {
+      offStage.bgCanvas.remove();
+      offStage.dispose();
+      abortRef.current = null;
+      setExporting(false);
+    }
+  };
+
   const handleExport = async (): Promise<void> => {
     const engine = engineRef.current;
     const stage = stageRef.current;
     if (!engine || !stage || exporting) return;
     if (!source) {
       setError("请先载入音频文件，再导出视频");
+      return;
+    }
+    if (exportMode === "offline") {
+      await exportOffline();
       return;
     }
 
@@ -287,6 +381,8 @@ export default function App() {
   const seekValue = Math.min(Math.max(timeMs, 0), seekMax);
   const progressPct = durationMs > 0 ? Math.min(100, (timeMs / durationMs) * 100) : 0;
   const locked = busy || exporting;
+  // WebCodecs 能力检测：不支持时离线模式在 UI 上禁用并回退实时录制
+  const offlineSupported = isOfflineRenderSupported();
   // 只在完全空白时盖住舞台：只有歌词或只有封面时仍显示既有画面
   const stageEmpty = !source && lines.length === 0 && !coverUrl;
 
@@ -486,20 +582,138 @@ export default function App() {
 
           <section className="panel-block">
             <h2 className="block-title">导出</h2>
+            <label className="file-field" htmlFor="export-mode">
+              <span className="file-label">模式</span>
+              <select
+                id="export-mode"
+                className="text-input"
+                value={exportMode}
+                disabled={locked}
+                onChange={(e) => setExportMode(e.target.value === "offline" ? "offline" : "realtime")}
+              >
+                <option value="realtime">实时录制 · 时长 = 播放时长</option>
+                <option value="offline" disabled={!offlineSupported}>
+                  离线渲染 · 逐帧编码
+                </option>
+              </select>
+            </label>
+
+            {exportMode === "offline" ? (
+              <div className="meta-row">
+                <label className="file-field" htmlFor="export-preset">
+                  <span className="file-label">分辨率</span>
+                  <select
+                    id="export-preset"
+                    className="text-input"
+                    value={resPreset}
+                    disabled={locked}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      setResPreset(id);
+                      const preset = RESOLUTION_PRESETS.find((p) => p.id === id);
+                      if (preset) {
+                        setOutWidth(preset.width);
+                        setOutHeight(preset.height);
+                      }
+                    }}
+                  >
+                    {RESOLUTION_PRESETS.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.label}
+                      </option>
+                    ))}
+                    <option value="custom">自定义</option>
+                  </select>
+                </label>
+                <label className="file-field" htmlFor="export-fps">
+                  <span className="file-label">帧率</span>
+                  <select
+                    id="export-fps"
+                    className="text-input"
+                    value={outFps}
+                    disabled={locked}
+                    onChange={(e) => setOutFps(Number(e.target.value))}
+                  >
+                    {FPS_CHOICES.map((f) => (
+                      <option key={f} value={f}>
+                        {f} fps
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+            ) : null}
+
+            {exportMode === "offline" && resPreset === "custom" ? (
+              <div className="meta-row">
+                <label className="file-field" htmlFor="export-width">
+                  <span className="file-label">宽</span>
+                  <input
+                    id="export-width"
+                    className="text-input"
+                    type="number"
+                    min={2}
+                    max={7680}
+                    step={2}
+                    value={outWidth}
+                    disabled={locked}
+                    onChange={(e) => {
+                      const v = e.target.valueAsNumber;
+                      if (Number.isFinite(v)) setOutWidth(v);
+                    }}
+                  />
+                </label>
+                <label className="file-field" htmlFor="export-height">
+                  <span className="file-label">高</span>
+                  <input
+                    id="export-height"
+                    className="text-input"
+                    type="number"
+                    min={2}
+                    max={7680}
+                    step={2}
+                    value={outHeight}
+                    disabled={locked}
+                    onChange={(e) => {
+                      const v = e.target.valueAsNumber;
+                      if (Number.isFinite(v)) setOutHeight(v);
+                    }}
+                  />
+                </label>
+              </div>
+            ) : null}
+
             <button
               type="button"
               className="btn btn-primary"
               onClick={() => void handleExport()}
               disabled={!source || locked}
             >
-              {exporting ? `导出中… ${Math.round(exportProgress * 100)}%` : "导出视频"}
+              {exporting
+                ? `${exportMode === "offline" ? "渲染中" : "导出中"}… ${Math.round(exportProgress * 100)}%`
+                : exportMode === "offline"
+                  ? "离线渲染导出"
+                  : "导出视频"}
             </button>
             {exporting ? (
               <div className="progress-track">
                 <div className="progress-fill" style={{ width: `${exportProgress * 100}%` }} />
               </div>
             ) : null}
-            <p className="hint">实时导出：录制耗时约等于歌曲时长，期间请保持页面在前台。</p>
+            {exporting && exportMode === "offline" ? (
+              <button type="button" className="btn" onClick={() => abortRef.current?.abort()}>
+                取消渲染
+              </button>
+            ) : null}
+            {exportMode === "offline" ? (
+              <p className="hint">
+                {offlineSupported
+                  ? `离线渲染：${snapEvenSize(outWidth)}×${snapEvenSize(outHeight)} @ ${outFps}fps，逐帧编码、不再等实时；非 16:9 的分辨率会等比居中留黑边。`
+                  : "当前浏览器不支持 WebCodecs，离线渲染不可用，请使用实时录制。"}
+              </p>
+            ) : (
+              <p className="hint">实时导出：录制耗时约等于歌曲时长，期间请保持页面在前台。</p>
+            )}
           </section>
 
           <div className="status-row">

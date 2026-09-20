@@ -176,10 +176,12 @@ export function drawLyricLine(
   timeMs: number,
   layout: LyricLayout,
   anim: { progress: number },
-  options?: { wordByWord?: boolean },
+  options?: { wordByWord?: boolean; scale?: number },
 ): void {
   if (!line) return;
 
+  // 阴影 / 辉光按设备像素生效、不随 ctx transform 缩放 → 显式乘 scale（离线导出 >1）
+  const pxScale = options?.scale ?? 1;
   const progress = clamp01(anim.progress);
   const isBG = line.isBG === true;
   const baseColor = isBG ? BG_BASE : WHITE;
@@ -266,7 +268,7 @@ export function drawLyricLine(
   ctx.save();
   ctx.globalAlpha = progress * fade;
   ctx.shadowColor = SHADOW_COLOR;
-  ctx.shadowBlur = SHADOW_BLUR;
+  ctx.shadowBlur = SHADOW_BLUR * pxScale;
   ctx.shadowOffsetY = SHADOW_OFFSET_Y;
   // 以左下锚点为原点缩放：字顶轻抬，行尾不漂移。
   ctx.translate(layout.x, baseline);
@@ -280,11 +282,11 @@ export function drawLyricLine(
     // 强调词白光：同色重绘一遍，只多出一圈白晕；黑色投影仍作基础可读性保障。
     if (progressive && isEmphasized(box.word, timeMs)) {
       ctx.shadowColor = `rgba(255,255,255,${glowLevelAt(box.word, timeMs)})`;
-      ctx.shadowBlur = Math.min(0.3, GLOW_BLUR * 0.3) * finalSize;
+      ctx.shadowBlur = Math.min(0.3, GLOW_BLUR * 0.3) * finalSize * pxScale;
       ctx.shadowOffsetY = 0;
       paintBox(box, i);
       ctx.shadowColor = SHADOW_COLOR;
-      ctx.shadowBlur = SHADOW_BLUR;
+      ctx.shadowBlur = SHADOW_BLUR * pxScale;
       ctx.shadowOffsetY = SHADOW_OFFSET_Y;
     }
   }
