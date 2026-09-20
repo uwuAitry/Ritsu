@@ -20,9 +20,9 @@ const COVER_ACCEPT = "image/*";
 
 // 离线渲染分辨率预设（16:9）+ 帧率档位；选「自定义」时宽高可编辑
 const RESOLUTION_PRESETS = [
-  { id: "1080p", label: "1080p · 1920×1080", width: 1920, height: 1080 },
-  { id: "1440p", label: "1440p · 2560×1440", width: 2560, height: 1440 },
-  { id: "4k", label: "4K · 3840×2160", width: 3840, height: 2160 },
+  { id: "1080p", label: "1080p（1920×1080）", width: 1920, height: 1080 },
+  { id: "1440p", label: "1440p（2560×1440）", width: 2560, height: 1440 },
+  { id: "4k", label: "4K（3840×2160）", width: 3840, height: 2160 },
 ] as const;
 const FPS_CHOICES = [24, 30, 60];
 
@@ -401,8 +401,11 @@ export default function App() {
       </div>
 
       <header className="app-header">
-        <h1 className="brand">Ritsu</h1>
-        <p className="tagline">歌词视频渲染器 · 支持 Dolby Atmos ADM BWF</p>
+        <h1 className="brand">
+          <span className="brand-mark" aria-hidden="true">律</span>
+          <span className="brand-name">Ritsu</span>
+        </h1>
+        <p className="tagline">歌词视频渲染器，支持 Dolby Atmos 空间摆位</p>
       </header>
 
       <main className="app-main">
@@ -410,13 +413,8 @@ export default function App() {
           <section className="panel-block">
             <h2 className="block-title">素材</h2>
 
-            <label className="file-field file-field--audio">
+            <label className="file-field">
               <span className="file-label" id="audio-file-label">
-                <span className="field-icon" aria-hidden="true">
-                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
-                    <path d="M2 7.2v1.6M5.5 4.2v7.6M9 2.2v11.6M12.5 5.2v5.6M15 7.2v1.6" />
-                  </svg>
-                </span>
                 音频文件
               </span>
               <input
@@ -430,16 +428,11 @@ export default function App() {
                   if (file) void handleAudio(file);
                 }}
               />
-              <span className="file-note">WAV · BWF · RF64 · FLAC · MP3 · M4A</span>
+              <span className="file-note">支持 WAV、BWF、FLAC、MP3、M4A</span>
             </label>
 
-            <label className="file-field file-field--lyric">
+            <label className="file-field">
               <span className="file-label" id="lyric-file-label">
-                <span className="field-icon" aria-hidden="true">
-                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
-                    <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h6.5" />
-                  </svg>
-                </span>
                 歌词文件
               </span>
               <input
@@ -453,18 +446,11 @@ export default function App() {
                   if (file) void handleLyric(file);
                 }}
               />
-              <span className="file-note">LRC · YRC · QRC · Lyricify · TTML</span>
+              <span className="file-note">支持 LRC、YRC、QRC、TTML</span>
             </label>
 
-            <label className="file-field file-field--cover">
+            <label className="file-field">
               <span className="file-label" id="cover-file-label">
-                <span className="field-icon" aria-hidden="true">
-                  <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="2.5" y="3" width="11" height="10" rx="2.5" />
-                    <circle cx="6" cy="6.6" r="1.1" />
-                    <path d="M3.2 11.8 6.4 9l2.3 1.9L11 8.2l2 2.2" />
-                  </svg>
-                </span>
                 封面图片
               </span>
               <span className="cover-row">
@@ -481,7 +467,7 @@ export default function App() {
                   }}
                 />
               </span>
-              <span className="file-note">建议 1:1 方图，PNG / JPG</span>
+              <span className="file-note">1:1 方图，PNG 或 JPG</span>
             </label>
           </section>
 
@@ -558,7 +544,18 @@ export default function App() {
                 disabled={!source || locked}
                 aria-label={playing ? "暂停" : "播放"}
               >
-                <span aria-hidden="true">{playing ? "⏸" : "▶"}</span>
+                <span aria-hidden="true">
+                  {playing ? (
+                    <svg viewBox="0 0 16 16" fill="currentColor">
+                      <rect x="3.5" y="2.5" width="3.2" height="11" rx="1" />
+                      <rect x="9.3" y="2.5" width="3.2" height="11" rx="1" />
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 16 16" fill="currentColor">
+                      <path d="M4.6 2.7 12.8 8l-8.2 5.3z" />
+                    </svg>
+                  )}
+                </span>
               </button>
               <div className="seek-wrap">
                 <span className="time-readout">
@@ -591,10 +588,8 @@ export default function App() {
                 disabled={locked}
                 onChange={(e) => setExportMode(e.target.value === "offline" ? "offline" : "realtime")}
               >
-                <option value="realtime">实时录制 · 时长 = 播放时长</option>
-                <option value="offline" disabled={!offlineSupported}>
-                  离线渲染 · 逐帧编码
-                </option>
+                <option value="realtime">实时录制（边播边录）</option>
+                <option value="offline" disabled={!offlineSupported}>离线渲染（逐帧编码）</option>
               </select>
             </label>
 
@@ -718,12 +713,12 @@ export default function App() {
 
           <div className="status-row">
             {busy ? <span className="chip chip-accent">处理中…</span> : null}
+            {source ? <span className="chip">{source.channelCount} 声道</span> : null}
             {source ? (
-              <span className="chip">
-                {source.channelCount} 声道 · {(source.sampleRate / 1000).toFixed(1)} kHz
-              </span>
+              <span className="chip">{(source.sampleRate / 1000).toFixed(1)} kHz</span>
             ) : null}
-            {adm ? <span className="chip chip-accent">Dolby Atmos · {adm.objects.length} 对象</span> : null}
+            {adm ? <span className="chip chip-accent">Dolby Atmos</span> : null}
+            {adm ? <span className="chip">{adm.objects.length} 个对象</span> : null}
             {lines.length > 0 ? <span className="chip">{lines.length} 行歌词</span> : null}
             {!source && lines.length === 0 && !busy ? (
               <span className="chip chip-muted">等待载入素材</span>
@@ -738,10 +733,6 @@ export default function App() {
         </aside>
 
         <section className="stage-panel">
-          <div className="stage-caption">
-            <span>预览 · 1920 × 1080</span>
-            <span>{playing ? "播放中" : source ? "已暂停" : "未载入音频"}</span>
-          </div>
           <div className="stage-frame" ref={stageHostRef}>
             {stageEmpty ? (
               <div className="stage-empty" aria-hidden="true">
