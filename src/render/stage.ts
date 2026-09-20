@@ -210,7 +210,9 @@ export class StageRenderer {
       idx >= 0 ? this.lines[idx] : null,
       timeMs,
       { x: 110, y: 830, maxWidth: 900 },
-      { progress, scale: this.scale },
+      { progress },
+      // 阴影 / 辉光按设备像素生效、不随 ctx transform 缩放 → 单独传输出缩放
+      { scale: this.scale },
     );
 
     this.drawAtmosPanel(ctx);
