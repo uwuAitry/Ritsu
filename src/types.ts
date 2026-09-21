@@ -33,7 +33,6 @@ export interface AdmObject {
   /** 摆位时间轴，按 timeMs 升序；缺省或长度 < 2 表示静态摆位 */
   track?: AdmKeyframe[];
 }
-}
 
 // 摆位视图的空间形状：盒形房间（默认）或球形空间
 export type AtmosRoomShape = "box" | "sphere";
