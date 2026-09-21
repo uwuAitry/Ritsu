@@ -33,6 +33,22 @@ export interface AdmObject {
   /** 摆位时间轴，按 timeMs 升序；缺省或长度 < 2 表示静态摆位 */
   track?: AdmKeyframe[];
 }
+}
+
+// 摆位视图的空间形状：盒形房间（默认）或球形空间
+export type AtmosRoomShape = "box" | "sphere";
+
+// 摆位视图选项（App → stage → atmos 透传；预览与离线导出共用同一份）
+export interface AtmosViewOptions {
+  /** 活动门控：隐藏未发声对象 */
+  activityEnabled?: boolean;
+  activityDelayMs?: number;
+  roomShape?: AtmosRoomShape;
+  /** 辉光轨迹时长（ms）；0 = 关闭 */
+  trailMs?: number;
+  /** 房间粒子 */
+  particles?: boolean;
+}
 
 // ADM BWF 解析结果
 export interface AdmMetadata {

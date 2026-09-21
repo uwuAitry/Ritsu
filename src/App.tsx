@@ -12,7 +12,7 @@ import { exportOfflineRender, isOfflineRenderSupported } from "./export/offline"
 import { loadLyricFile } from "./lyric/load";
 import { StageRenderer } from "./render/stage";
 import type { StageMeta } from "./render/stage";
-import type { AdmMetadata, AudioSource } from "./types";
+import type { AdmMetadata, AtmosRoomShape, AudioSource } from "./types";
 
 const AUDIO_ACCEPT = "audio/*,.wav,.bwf,.rf64,.flac,.mp3,.m4a,.aac,.ogg";
 const LYRIC_ACCEPT = ".lrc,.yrc,.qrc,.lys,.lyl,.lqe,.ttml,.xml,.txt";
@@ -102,6 +102,11 @@ export default function App() {
   // 摆位显示：隐藏未发声对象 + 消失延迟（秒）
   const [hideSilent, setHideSilent] = useState(false);
   const [silentDelaySec, setSilentDelaySec] = useState(2);
+  // 摆位视图：空间形状 / 辉光轨迹 / 房间粒子（都由 timeMs 驱动，导出与预览一致）
+  const [roomShape, setRoomShape] = useState<AtmosRoomShape>("box");
+  const [trailOn, setTrailOn] = useState(true);
+  const [trailSec, setTrailSec] = useState(0.5);
+  const [particlesOn, setParticlesOn] = useState(true);
 
   // 引擎 / 舞台在挂载时创建、卸载时销毁。StrictMode 的模拟卸载走同一条清理路径，
   // 重新挂载即重建 —— 不在 render 里 new，避免被双调用泄漏 AudioContext / WebGL context。
@@ -115,6 +120,14 @@ export default function App() {
     // StageRenderer 靠它 querySelector("canvas") 找到 AMLL 流体背景画布。
     stageHostRef.current?.appendChild(stage.canvas);
     bgHostRef.current?.appendChild(stage.bgCanvas);
+    // 舞台到手就按当前状态初始化摆位视图（渲染器默认值与这里一致，显式下发避免以后默认值漂移）
+    stage.setViewOptions({
+      activityEnabled: hideSilent,
+      activityDelayMs: silentDelaySec * 1000,
+      roomShape,
+      trailMs: trailOn ? trailSec * 1000 : 0,
+      particles: particlesOn,
+    });
     stage.render();
 
     const offTick = engine.onTick((t) => {
@@ -202,15 +215,37 @@ export default function App() {
     stage.render();
   };
 
-  // 摆位显示开关：同步渲染器选项并补一帧（暂停时没有 tick）
-  const updateActivity = (patch: { hideSilent?: boolean; silentDelaySec?: number }): void => {
+  // 摆位视图选项：改状态 + 下发给渲染器，并补一帧（暂停时没有 tick，画面不会自己更新）
+  const updateView = (patch: {
+    hideSilent?: boolean;
+    silentDelaySec?: number;
+    roomShape?: AtmosRoomShape;
+    trailOn?: boolean;
+    trailSec?: number;
+    particlesOn?: boolean;
+  }): void => {
     const nextHide = patch.hideSilent ?? hideSilent;
     const nextDelay = patch.silentDelaySec ?? silentDelaySec;
+    const nextShape = patch.roomShape ?? roomShape;
+    const nextTrailOn = patch.trailOn ?? trailOn;
+    const nextTrailSec = patch.trailSec ?? trailSec;
+    const nextParticles = patch.particlesOn ?? particlesOn;
     setHideSilent(nextHide);
     setSilentDelaySec(nextDelay);
+    setRoomShape(nextShape);
+    setTrailOn(nextTrailOn);
+    setTrailSec(nextTrailSec);
+    setParticlesOn(nextParticles);
     const stage = stageRef.current;
     if (!stage) return;
-    stage.setActivityOptions({ enabled: nextHide, delayMs: nextDelay * 1000 });
+    stage.setViewOptions({
+      activityEnabled: nextHide,
+      activityDelayMs: nextDelay * 1000,
+      roomShape: nextShape,
+      // 轨迹时长 0 = 关闭，不需要单独的开关字段
+      trailMs: nextTrailOn ? nextTrailSec * 1000 : 0,
+      particles: nextParticles,
+    });
     syncStage();
   };
 
@@ -294,7 +329,13 @@ export default function App() {
     offStage.setMeta(resolveMeta(metaInput, metaDefault));
     offStage.setDuration((engine.duration || source.durationSec) * 1000);
     offStage.setAdm(adm, adm ? admActivityRef.current : null);
-    offStage.setActivityOptions({ enabled: hideSilent, delayMs: silentDelaySec * 1000 });
+    offStage.setViewOptions({
+      activityEnabled: hideSilent,
+      activityDelayMs: silentDelaySec * 1000,
+      roomShape,
+      trailMs: trailOn ? trailSec * 1000 : 0,
+      particles: particlesOn,
+    });
     // bgCanvas 挂进预览的流体背景宿主：StageRenderer 靠 parentElement 里的 canvas 找到 AMLL
     // 流体背景（宿主是空的 React 节点，追加的 canvas 不会被 React 回收）。
     // ponytail: AMLL 流体画布由 AMLL 自身按真实时间驱动、无法按时间轴重放，离线导出里它只按
@@ -504,11 +545,26 @@ export default function App() {
           {adm ? (
             <section className="panel-block">
               <h2 className="block-title">摆位显示</h2>
+              <label className="file-field" htmlFor="room-shape">
+                <span className="file-label">空间形状</span>
+                <select
+                  id="room-shape"
+                  className="text-input"
+                  value={roomShape}
+                  disabled={locked}
+                  onChange={(e) =>
+                    updateView({ roomShape: e.target.value === "sphere" ? "sphere" : "box" })
+                  }
+                >
+                  <option value="box">盒形房间</option>
+                  <option value="sphere">球形空间</option>
+                </select>
+              </label>
               <label className="check-row">
                 <input
                   type="checkbox"
                   checked={hideSilent}
-                  onChange={(e) => updateActivity({ hideSilent: e.target.checked })}
+                  onChange={(e) => updateView({ hideSilent: e.target.checked })}
                 />
                 <span>隐藏未发声对象</span>
               </label>
@@ -525,12 +581,48 @@ export default function App() {
                   aria-label="消失延迟秒数"
                   onChange={(e) => {
                     const v = e.target.valueAsNumber;
-                    if (Number.isFinite(v)) updateActivity({ silentDelaySec: v });
+                    if (Number.isFinite(v)) updateView({ silentDelaySec: v });
                   }}
                 />
                 <span>秒</span>
               </label>
-              <p className="hint">对象停止发声超过延迟后从摆位图淡出，重新发声立即恢复。</p>
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={trailOn}
+                  onChange={(e) => updateView({ trailOn: e.target.checked })}
+                />
+                <span>辉光轨迹</span>
+              </label>
+              <label className="delay-row">
+                <span>轨迹时长</span>
+                <input
+                  className="text-input delay-input"
+                  type="number"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={trailSec}
+                  disabled={!trailOn || locked}
+                  aria-label="辉光轨迹时长秒数"
+                  onChange={(e) => {
+                    const v = e.target.valueAsNumber;
+                    if (Number.isFinite(v)) updateView({ trailSec: v });
+                  }}
+                />
+                <span>秒</span>
+              </label>
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={particlesOn}
+                  onChange={(e) => updateView({ particlesOn: e.target.checked })}
+                />
+                <span>房间粒子</span>
+              </label>
+              <p className="hint">
+                对象停止发声超过「消失延迟」后淡出，重新发声立即恢复；轨迹与粒子都由时间驱动，预览与离线导出逐帧一致。
+              </p>
             </section>
           ) : null}
 

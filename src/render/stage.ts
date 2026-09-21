@@ -1,7 +1,7 @@
 // StageRenderer：把整个视觉舞台合成到一张 1920×1080 的 2D canvas。
 // 预览与导出共用同一帧路径（无 React / 无 DOM 挂载），保证像素一致。
 import type { LyricLine } from "@applemusic-like-lyrics/core";
-import type { AdmMetadata } from "../types";
+import type { AdmMetadata, AtmosViewOptions } from "../types";
 import { AtmosRenderer } from "../atmos/renderer";
 import { findActiveLine, drawLyricLine } from "./lyric";
 
@@ -154,9 +154,9 @@ export class StageRenderer {
     this.atmos.setObjects(meta ? meta.objects : [], channelActivity);
   }
 
-  /** 摆位对象活动门控：开关 + 消失延迟（透传 atmos；重绘由调用方负责） */
-  setActivityOptions(opts: { enabled?: boolean; delayMs?: number }): void {
-    this.atmos.setActivityOptions(opts);
+  /** 摆位视图选项：活动门控 + 空间形状 + 辉光轨迹 + 房间粒子（透传 atmos；重绘由调用方负责） */
+  setViewOptions(opts: AtmosViewOptions): void {
+    this.atmos.setViewOptions(opts);
   }
 
   setMeta(meta: StageMeta): void {

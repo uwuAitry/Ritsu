@@ -1,49 +1,110 @@
 import * as THREE from "three";
-import { ACTIVITY_WINDOW_MS, type AdmKeyframe, type AdmObject } from "../types";
+import {
+  ACTIVITY_WINDOW_MS,
+  type AdmKeyframe,
+  type AdmObject,
+  type AtmosRoomShape,
+  type AtmosViewOptions,
+} from "../types";
 import { visibilityAt } from "./activity";
+import {
+  boxRoomLines,
+  boxRoomPoints,
+  depthDimAt,
+  fillParticles,
+  fitDistanceForPoints,
+  fitDistanceForRadius,
+  isMovingTrack,
+  markerWorldRadius,
+  sampleTrackAt,
+  sphereRoomLines,
+  trailSampleOffsets,
+  trailWindowStart,
+  updateParticles,
+  type Vec3Out,
+} from "./geometry";
 
 // AtmosRenderer：ADM 摆位 3D 视图。
 // 只拥有一个离屏 canvas（不挂载 DOM、不是 React 组件），由 compositor drawImage 到 1920×1080 主画布。
+//
+// 两条贯穿全文件的约束：
+// 1. 画面必须是 timeMs 的纯函数（无滚动缓冲 / 无墙钟 / 无帧计数）——预览与离线逐帧导出共用它，
+//    任何「累积型」动画都会让成片与预览不一致。粒子有随机布局，用固定 seed 保证两次运行相同。
+// 2. 所有形状与取景数值都在 geometry.ts 里算（那一侧不依赖 three，可在 CI 裸 Node 下自检）。
 
-// 单位球半径 = ADM 距离 1；对象小球半径（世界单位）。
-// 相机为容纳房间外接球后移约 1.6 倍（见 ROOM_BOUND_FACTOR），小球半径同步放大，
-// 使对象在画面里的视角尺寸与可读性基本不变
-const OBJECT_RADIUS = 0.075;
-// 需完整入镜的包围球半径（单位球 + 光晕余量）
+// 单位球半径 = ADM 距离 1。以下是「基准半径」，实际缩放由 root.scale 按屏幕尺寸决定。
+const OBJECT_RADIUS_BASE = 0.075;
+// 标记在画面上的半径 / 视口高：恒定值 → 对象云再散、分辨率再高，标记都是同样大小
+const MARKER_RADIUS_FRAC = 0.019;
+// 需完整入镜的包围球半径下限（单位球 + 光晕余量）
 const FIT_RADIUS = 1.25;
 // 相机方向：原点前左上方。方位角约 30°（偏画面左）、俯角约 20°，
 // 形成两点透视——最近的竖直棱落在画面中心左侧，视线略向下但无侧倾（lookAt 默认 up）
 const CAMERA_DIR = new THREE.Vector3(-0.47, 0.342, 0.814).normalize();
 const CAMERA_TARGET = new THREE.Vector3(0, 0.05, 0);
+const FOV_DEG = 40;
+// 取景余量：贴边后再留 2% 呼吸空间
+const FIT_MARGIN = 1.02;
 
-// 房间线框：地板格 + 背墙/右侧墙轮廓。提亮后的钢蓝色细线，无填充/无背景，
-// 只为摆位视图提供“房间”参照，画布保持透明以便 alpha 合成与 captureStream 导出。
-// 亮度刻意压在彩色对象之下（1px 细线 + 透明度），避免变成抢戏的“亮笼子”
-const ROOM_COLOR = 0x9fb3c8;
-const ROOM_LINE_OPACITY = 0.75;
-// 以下尺寸为 fitRadius === FIT_RADIUS 时的基准值；实际房间在 setObjects 里按
-// fitRadius / FIT_RADIUS 整体等比缩放，因此基准值不变也能随取景半径伸缩
+// 房间线框：钢蓝灰细线，无填充/无背景，只为摆位视图提供空间参照，画布保持透明以便 alpha 合成与导出。
+// 亮度刻意压在彩色对象之下（1px 细线 + 低不透明度）——它是参照物，不是主角。
+const ROOM_COLOR = 0x77879b;
+const ROOM_LINE_OPACITY = 0.42;
+// 赤道是球形空间里唯一有含义的结构线（听者平面），单独给更高的不透明度
+const EQUATOR_OPACITY = 0.6;
+const LISTENER_COLOR = 0x9fb0c4;
+const LISTENER_OPACITY = 0.32;
+
+// 盒形房间尺寸：7×6 格、间距 0.5。比对象云（单位立方体）明显外扩，
+// 于是对象落在房间半宽的 ~55% 处——不再贴着墙，房间读起来更大。
 const FLOOR_Y = -1; // 单位球最低点，对象漂浮其上方
 const ROOM_TOP_Y = 1;
-const ROOM_HALF_W = 1.5; // x 半宽：6 格 × 0.5
-const ROOM_HALF_D = 1.25; // z 半深：5 格 × 0.5
-const GRID_COLS = 6;
-const GRID_ROWS = 5;
+const ROOM_HALF_W = 1.75;
+const ROOM_HALF_D = 1.5;
+const GRID_COLS = 7;
+const GRID_ROWS = 6;
 
-// 房间外接球系数：fitCamera 按「包围球」取景，而基准盒半对角
-// sqrt(1.5² + 1² + 1.25²) ≈ 2.194 > FIT_RADIUS 1.25——取景半径若只覆盖 fitRadius，
-// 墙角必然落在保证入镜球之外（房间被裁切）。房间随 fitRadius 等比缩放，此比值恒定。
+// 球形房间：半径必须把单位立方体（角点 √3 ≈ 1.73）包进去，否则角落对象会戳出球外
+const SPHERE_RADIUS = 1.8;
+const SPHERE_MERIDIANS = 8; // 每 45° 一条经线
+const SPHERE_PARALLELS = 3; // → ±45° 两条纬线 + 赤道，稀疏得像地球仪而不是亮笼子
+
+// 深度明暗：近端 1 → 远端 0.62。补回被 depthTest:false 抹平的层次，12+ 对象重叠时读得出前后
+const DEPTH_DIM_FAR = 0.62;
+
+// 标记与光晕
+const MARKER_SAT = 0.44;
+const MARKER_LIGHT = 0.63;
+const HALO_SCALE = 3.8; // 相对标记半径
+const HALO_OPACITY = 0.3;
+
+// 辉光轨迹：6 个同材质 sprite 沿时间轴反向采样，只做尺寸渐隐（共享材质 → 每节点多 1 个材质）
+// ponytail: 逐点 alpha 需要自定义 shader，这里尺寸渐隐 + 加色叠加已够像彗尾；要更细腻再上 Points + shader
+const TRAIL_SAMPLES = 6;
+const TRAIL_HEAD_SCALE = 2.6;
+const TRAIL_TAIL_SCALE = 0.6;
+const TRAIL_OPACITY = 0.22;
+const DEFAULT_TRAIL_MS = 500;
+
+// 房间粒子：微尘，不是星空——冷灰、极低不透明度、普通混合（不用加色）
+const PARTICLE_COUNT = 240;
+const PARTICLE_SEED = 0x5eed;
+const PARTICLE_COLOR = 0x8b9aac;
+const PARTICLE_OPACITY = 0.24;
+const PARTICLE_RADIUS_FRAC = 0.0055;
+
 const ROOM_HALF_H = (ROOM_TOP_Y - FLOOR_Y) / 2;
-const ROOM_BOUND_FACTOR =
-  Math.sqrt(ROOM_HALF_W * ROOM_HALF_W + ROOM_HALF_H * ROOM_HALF_H + ROOM_HALF_D * ROOM_HALF_D) /
-  FIT_RADIUS;
-// 外接球对盒子是保守上界（盒子轮廓小于外接球），再留 2% 呼吸空间
-const ROOM_FRAME_MARGIN = 1.02;
 
 type ObjectNode = {
   root: THREE.Mesh;
   materials: THREE.Material[];
+  trail: THREE.Sprite[];
+  trailGroup: THREE.Group;
   track?: AdmKeyframe[];
+  /** 关键帧是否真的在动：静态对象不建拖尾（省 6 个 sprite 的绘制） */
+  moving: boolean;
+  /** 活动门控可见度（不含深度明暗） */
+  vis: number;
   /** 发声活动位图（100ms/窗，随声道绑定取自解码期时间线）；null = 始终发声 */
   activity: Uint8Array | null;
 };
@@ -80,7 +141,7 @@ function makeGlowTexture(): THREE.CanvasTexture {
 }
 
 // 线框：positions 为成对线段端点。WebGL 忽略 linewidth，天然 1px 细线
-function makeLineSegments(positions: number[]): THREE.LineSegments {
+function makeLineSegments(positions: number[], opacity: number): THREE.LineSegments {
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
   return new THREE.LineSegments(
@@ -88,34 +149,10 @@ function makeLineSegments(positions: number[]): THREE.LineSegments {
     new THREE.LineBasicMaterial({
       color: ROOM_COLOR,
       transparent: true,
-      opacity: ROOM_LINE_OPACITY,
+      opacity,
       depthWrite: false,
     }),
   );
-}
-
-// 地板格（6×5 格）+ 背墙/右侧墙轮廓：纯线框，无天花板、无填充
-function makeRoom(): THREE.LineSegments {
-  const p: number[] = [];
-  const w = ROOM_HALF_W;
-  const d = ROOM_HALF_D;
-  // 地板：沿 x 的 7 条竖线 + 沿 z 的 6 条横线
-  for (let i = 0; i <= GRID_COLS; i += 1) {
-    const x = -w + (2 * w * i) / GRID_COLS;
-    p.push(x, FLOOR_Y, -d, x, FLOOR_Y, d);
-  }
-  for (let j = 0; j <= GRID_ROWS; j += 1) {
-    const z = -d + (2 * d * j) / GRID_ROWS;
-    p.push(-w, FLOOR_Y, z, w, FLOOR_Y, z);
-  }
-  // 背墙（z=-d）：顶边 + 左右竖棱（底边与地板横线重合，省去）
-  p.push(-w, ROOM_TOP_Y, -d, w, ROOM_TOP_Y, -d);
-  p.push(-w, FLOOR_Y, -d, -w, ROOM_TOP_Y, -d);
-  p.push(w, FLOOR_Y, -d, w, ROOM_TOP_Y, -d);
-  // 右侧墙（x=+w）：顶边 + 前竖棱（后竖棱即背墙右棱）
-  p.push(w, ROOM_TOP_Y, -d, w, ROOM_TOP_Y, d);
-  p.push(w, FLOOR_Y, d, w, ROOM_TOP_Y, d);
-  return makeLineSegments(p);
 }
 
 export class AtmosRenderer {
@@ -128,13 +165,39 @@ export class AtmosRenderer {
   private readonly nodeList: ObjectNode[] = [];
   private readonly sphereGeometry: THREE.SphereGeometry;
   private readonly glowTexture: THREE.CanvasTexture;
-  // 房间线框：按基准尺寸建一次，之后靠 scale 跟随 fitRadius（几何无需重建）
-  private readonly room: THREE.LineSegments;
+  private readonly listener: THREE.Mesh;
+  // 房间线框：形状可变（盒形/球形），由 rebuildRoom 重建；尺寸靠 scale 跟随 fitRadius
+  private room: THREE.LineSegments;
+  private equator: THREE.LineSegments | null = null;
+  /** 取景点集（基准尺度）：盒形为 8 角点，球形为球面网格点 */
+  private roomPoints: number[];
+  private readonly fitScratch: number[] = [];
+  // 房间粒子：基座与参数一次算好，每帧只按 timeMs 重算位置
+  private readonly particleGeometry: THREE.BufferGeometry;
+  private readonly particleMaterial: THREE.PointsMaterial;
+  private readonly particles: THREE.Points;
+  private readonly particleBase: Float32Array;
+  private readonly particleParams: Float32Array;
+  private readonly particlePositions: Float32Array;
+  private readonly tmp: Vec3Out = { x: 0, y: 0, z: 0 };
+
   private timeMs = 0;
   // 取景半径：按实际对象/关键帧范围计算，FIT_RADIUS 为下限
   private fitRadius = FIT_RADIUS;
+  /** 房间缩放：房间与粒子都按它跟随取景半径 */
+  private roomScale = 1;
+  /** 相机到取景中心的距离（深度明暗的基准） */
+  private cameraDistance = FIT_RADIUS;
   private viewW = 1;
   private viewH = 1;
+
+  // ── 视图选项（由 setViewOptions 下发） ──
+  private roomShape: AtmosRoomShape = "box";
+  private trailMs = DEFAULT_TRAIL_MS;
+  private trailOffsets: number[] = trailSampleOffsets(DEFAULT_TRAIL_MS, TRAIL_SAMPLES);
+  private particlesOn = true;
+  private activityEnabled = false;
+  private activityDelayMs = 2000;
 
   constructor(width: number, height: number) {
     this.canvas = document.createElement("canvas");
@@ -143,28 +206,54 @@ export class AtmosRenderer {
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.setSize(width, height, false);
 
-    this.camera = new THREE.PerspectiveCamera(40, 1, 0.1, 50);
-    this.sphereGeometry = new THREE.SphereGeometry(OBJECT_RADIUS, 16, 12);
+    this.camera = new THREE.PerspectiveCamera(FOV_DEG, 1, 0.1, 50);
+    this.sphereGeometry = new THREE.SphereGeometry(OBJECT_RADIUS_BASE, 16, 12);
     this.glowTexture = makeGlowTexture();
 
     // 原点听者标记：细环，标示听者位置；转平落在 XZ 平面（水平面），既不是音频对象也不是测距标尺
-    const listener = new THREE.Mesh(
+    this.listener = new THREE.Mesh(
       new THREE.TorusGeometry(0.075, 0.0105, 8, 40),
-      new THREE.MeshBasicMaterial({ color: 0x9fb0c4, transparent: true, opacity: 0.4, depthWrite: false }),
+      new THREE.MeshBasicMaterial({
+        color: LISTENER_COLOR,
+        transparent: true,
+        opacity: LISTENER_OPACITY,
+        depthWrite: false,
+      }),
     );
-    listener.rotation.x = -Math.PI / 2;
-    this.scene.add(listener);
+    this.listener.rotation.x = -Math.PI / 2;
+    this.scene.add(this.listener);
 
-    // 房间线框：给对象云一个地板与墙角参照；尺寸在 setObjects 里随 fitRadius 缩放
-    this.room = makeRoom();
+    // 粒子的基座/参数在 rebuildRoom 里按形状填；这里先准备好缓冲与对象
+    this.particleBase = new Float32Array(PARTICLE_COUNT * 3);
+    this.particleParams = new Float32Array(PARTICLE_COUNT * 3);
+    this.particlePositions = new Float32Array(PARTICLE_COUNT * 3);
+    this.particleGeometry = new THREE.BufferGeometry();
+    this.particleGeometry.setAttribute("position", new THREE.BufferAttribute(this.particlePositions, 3));
+    this.particleMaterial = new THREE.PointsMaterial({
+      map: this.glowTexture,
+      color: PARTICLE_COLOR,
+      size: 0.01,
+      sizeAttenuation: true,
+      transparent: true,
+      opacity: PARTICLE_OPACITY,
+      depthWrite: false,
+    });
+    this.particles = new THREE.Points(this.particleGeometry, this.particleMaterial);
+    // 位置每帧变，包围盒会过期 → 关掉视锥剔除
+    this.particles.frustumCulled = false;
+    this.scene.add(this.particles);
+
+    // 默认盒形房间（与 roomShape 字段一致）
+    this.room = makeLineSegments(
+      boxRoomLines(ROOM_HALF_W, ROOM_HALF_D, GRID_COLS, GRID_ROWS, FLOOR_Y, ROOM_TOP_Y),
+      ROOM_LINE_OPACITY,
+    );
+    this.roomPoints = boxRoomPoints(ROOM_HALF_W, ROOM_HALF_D, FLOOR_Y, ROOM_TOP_Y);
     this.scene.add(this.room);
+    this.rebuildParticles();
 
     this.resize(width, height);
   }
-
-  // 活动门控：enabled=false 时所有节点保持可见（setActivityOptions 里复位一次）
-  private activityEnabled = false;
-  private activityDelayMs = 2000;
 
   setObjects(objects: AdmObject[], channelActivity?: Uint8Array[] | null): void {
     const live = new Set<string>();
@@ -178,6 +267,7 @@ export class AtmosRenderer {
         this.scene.add(node.root);
       }
       node.track = obj.track;
+      node.moving = isMovingTrack(obj.track);
       // 发声活动位图：按对象绑定的声道号取对应声道的时间线；未绑定/越界 → null（始终发声）
       const bound =
         obj.channelIndex !== undefined && channelActivity
@@ -191,6 +281,7 @@ export class AtmosRenderer {
     for (const [key, node] of this.nodes) {
       if (!live.has(key)) {
         this.scene.remove(node.root);
+        this.scene.remove(node.trailGroup);
         for (const m of node.materials) m.dispose();
         this.nodes.delete(key);
       }
@@ -215,16 +306,19 @@ export class AtmosRenderer {
       if (d0 > maxDist) maxDist = d0;
     }
     this.fitRadius = Math.max(FIT_RADIUS, maxDist + 0.25);
-    // 房间随 fitRadius 等比缩放：对象云越散、相机后撤多少，房间就放大多少，
-    // 于是任何取景半径下房间都保持同样的留白比例（fitRadius 已含 +0.25 光晕余量，
-    // 房间边角落在球外一点，仍在画面内且留有余裕）。
-    // 等比缩放同时让格子在屏幕上的疏密恒定，故 6×5 不再加密——加密会把它推向亮笼子
-    this.room.scale.setScalar(this.fitRadius / FIT_RADIUS);
+    // 房间与粒子随 fitRadius 等比缩放：对象云越散、相机后撤多少，房间就放大多少，
+    // 于是任何取景半径下房间都保持同样的相对尺度。取景按房间轮廓收紧（见 fitCamera），
+    // 所以房间在画幅里占得比「按外接球保守取景」时更满。
+    this.roomScale = this.fitRadius / FIT_RADIUS;
+    this.room.scale.setScalar(this.roomScale);
+    this.particles.scale.setScalar(this.roomScale);
     this.fitCamera(this.viewW, this.viewH);
+    this.refreshParticles(this.timeMs);
 
     // setTime 用索引扫描，避免每帧分配迭代器/闭包
     this.nodeList.length = 0;
     for (const node of this.nodes.values()) this.nodeList.push(node);
+    this.updateNodeLooks();
   }
 
   setTime(currentTimeMs: number): void {
@@ -234,66 +328,44 @@ export class AtmosRenderer {
     for (let n = 0; n < nodes.length; n += 1) {
       const node = nodes[n];
       // 活动门控对全部节点生效（含无轨迹的静态对象），置于轨迹处理之前
-      if (this.activityEnabled) this.applyActivity(node, currentTimeMs);
-      const track = node.track;
-      if (!track || track.length < 2) continue;
-      const first = track[0];
-      const last = track[track.length - 1];
-      let x: number;
-      let y: number;
-      let z: number;
-      if (currentTimeMs <= first.timeMs) {
-        x = first.x;
-        y = first.y;
-        z = first.z;
-      } else if (currentTimeMs >= last.timeMs) {
-        x = last.x;
-        y = last.y;
-        z = last.z;
-      } else {
-        // track[i-1].timeMs <= t < track[i].timeMs
-        let i = 1;
-        while (i < track.length && track[i].timeMs <= currentTimeMs) i += 1;
-        const a = track[i - 1];
-        const b = track[i];
-        if (b.jump) {
-          // jumpPosition=1：保持 a 的位置直到 b.timeMs 再瞬间切换
-          x = a.x;
-          y = a.y;
-          z = a.z;
-        } else {
-          const span = b.timeMs - a.timeMs;
-          const f = span > 0 ? (currentTimeMs - a.timeMs) / span : 1;
-          x = a.x + (b.x - a.x) * f;
-          y = a.y + (b.y - a.y) * f;
-          z = a.z + (b.z - a.z) * f;
-        }
+      if (this.activityEnabled) {
+        node.vis = visibilityAt(node.activity, currentTimeMs, this.activityDelayMs, ACTIVITY_WINDOW_MS);
       }
-      node.root.position.set(x, z, -y);
+      const track = node.track;
+      if (track && track.length >= 2) {
+        sampleTrackAt(track, currentTimeMs, this.tmp);
+        node.root.position.set(this.tmp.x, this.tmp.z, -this.tmp.y);
+      }
     }
+    this.refreshParticles(currentTimeMs);
+    this.updateNodeLooks();
   }
 
-  /** 活动门控开关与消失延迟。关闭时立即把所有节点复位为可见，等价于功能 no-op。 */
-  setActivityOptions(opts: { enabled?: boolean; delayMs?: number }): void {
-    if (opts.enabled !== undefined) this.activityEnabled = opts.enabled;
-    if (opts.delayMs !== undefined && opts.delayMs >= 0) this.activityDelayMs = opts.delayMs;
+  /**
+   * 视图选项：活动门控 + 空间形状 + 辉光轨迹时长 + 房间粒子。
+   * 关闭门控时立即把所有节点复位为可见，等价于该功能 no-op。
+   */
+  setViewOptions(opts: AtmosViewOptions): void {
+    if (opts.activityEnabled !== undefined) this.activityEnabled = opts.activityEnabled;
+    if (opts.activityDelayMs !== undefined && opts.activityDelayMs >= 0) {
+      this.activityDelayMs = opts.activityDelayMs;
+    }
+    if (opts.trailMs !== undefined && opts.trailMs >= 0 && opts.trailMs !== this.trailMs) {
+      this.trailMs = opts.trailMs;
+      this.trailOffsets = trailSampleOffsets(this.trailMs, TRAIL_SAMPLES);
+    }
+    if (opts.particles !== undefined && opts.particles !== this.particlesOn) {
+      this.particlesOn = opts.particles;
+      this.particles.visible = opts.particles;
+    }
+    if (opts.roomShape !== undefined && opts.roomShape !== this.roomShape) {
+      this.roomShape = opts.roomShape;
+      this.rebuildRoom();
+    }
     if (!this.activityEnabled) {
-      for (const node of this.nodes.values()) this.applyVisibility(node, 1);
+      for (const node of this.nodes.values()) node.vis = 1;
     }
-  }
-
-  // 每帧门控：查可见度 → 直接写透明度与 visible（节点数少，逐帧写无压力）
-  private applyActivity(node: ObjectNode, tMs: number): void {
-    const v = visibilityAt(node.activity, tMs, this.activityDelayMs, ACTIVITY_WINDOW_MS);
-    this.applyVisibility(node, v);
-  }
-
-  private applyVisibility(node: ObjectNode, v: number): void {
-    node.root.visible = v > 0.001;
-    const body = node.materials[0] as THREE.MeshBasicMaterial;
-    const halo = node.materials[1] as THREE.SpriteMaterial;
-    body.opacity = v;
-    halo.opacity = 0.5 * v;
+    this.updateNodeLooks();
   }
 
   render(): void {
@@ -305,66 +377,230 @@ export class AtmosRenderer {
     this.viewH = height;
     this.renderer.setSize(Math.max(width, 1), Math.max(height, 1), false);
     this.fitCamera(width, height);
+    this.updateNodeLooks();
   }
 
   dispose(): void {
     // 对象节点：材质各自持有；球几何为所有节点共享，只释放一次
     for (const node of this.nodes.values()) {
       for (const m of node.materials) m.dispose();
+      this.scene.remove(node.trailGroup);
     }
-    this.sphereGeometry.dispose();
-    // 场景其余 Mesh/LineSegments（听者环、房间线框等）：跳过共享球几何，避免重复 dispose
-    this.scene.traverse((obj) => {
-      if (
-        (obj instanceof THREE.Mesh || obj instanceof THREE.LineSegments) &&
-        obj.geometry !== this.sphereGeometry
-      ) {
-        obj.geometry.dispose();
-        const material = obj.material;
-        if (Array.isArray(material)) material.forEach((m) => m.dispose());
-        else material.dispose();
-      }
-    });
-    this.glowTexture.dispose();
     this.nodes.clear();
     this.nodeList.length = 0;
+    this.sphereGeometry.dispose();
+    this.disposeRoom();
+    this.particleGeometry.dispose();
+    this.particleMaterial.dispose();
+    this.listener.geometry.dispose();
+    (this.listener.material as THREE.Material).dispose();
+    this.glowTexture.dispose();
     this.renderer.dispose();
     // ponytail: 只释放 renderer；若频繁创建/销毁实例（浏览器 GL 上下文上限 ~16），再加 forceContextLoss()
   }
 
-  // 按宽高比沿视线后移相机，保证包围球始终完整入镜（竖屏面板不裁边）
+  // ── 房间与粒子 ─────────────────────────────────────────
+
+  private disposeRoom(): void {
+    this.scene.remove(this.room);
+    this.room.geometry.dispose();
+    (this.room.material as THREE.Material).dispose();
+    if (this.equator) {
+      this.scene.remove(this.equator);
+      this.equator.geometry.dispose();
+      (this.equator.material as THREE.Material).dispose();
+      this.equator = null;
+    }
+  }
+
+  /** 切换空间形状：重建线框 + 取景点集 + 粒子基座，然后重新取景。 */
+  private rebuildRoom(): void {
+    this.disposeRoom();
+    if (this.roomShape === "sphere") {
+      const globe = sphereRoomLines(SPHERE_RADIUS, SPHERE_MERIDIANS, SPHERE_PARALLELS);
+      this.room = makeLineSegments(globe.lines, ROOM_LINE_OPACITY);
+      this.equator = makeLineSegments(globe.equator, EQUATOR_OPACITY);
+      this.equator.scale.setScalar(this.roomScale);
+      this.scene.add(this.equator);
+    } else {
+      this.room = makeLineSegments(
+        boxRoomLines(ROOM_HALF_W, ROOM_HALF_D, GRID_COLS, GRID_ROWS, FLOOR_Y, ROOM_TOP_Y),
+        ROOM_LINE_OPACITY,
+      );
+      this.roomPoints = boxRoomPoints(ROOM_HALF_W, ROOM_HALF_D, FLOOR_Y, ROOM_TOP_Y);
+    }
+    this.room.scale.setScalar(this.roomScale);
+    this.scene.add(this.room);
+    this.rebuildParticles();
+    this.fitCamera(this.viewW, this.viewH);
+  }
+
+  private rebuildParticles(): void {
+    fillParticles(
+      PARTICLE_COUNT,
+      this.roomShape,
+      ROOM_HALF_W,
+      ROOM_HALF_D,
+      ROOM_HALF_H,
+      SPHERE_RADIUS,
+      PARTICLE_SEED,
+      this.particleBase,
+      this.particleParams,
+    );
+    this.refreshParticles(this.timeMs);
+  }
+
+  private refreshParticles(tMs: number): void {
+    if (!this.particlesOn) return;
+    updateParticles(
+      this.particleBase,
+      this.particleParams,
+      PARTICLE_COUNT,
+      tMs,
+      this.particlePositions,
+    );
+    (this.particleGeometry.getAttribute("position") as THREE.BufferAttribute).needsUpdate = true;
+  }
+
+  // ── 取景 ───────────────────────────────────────────────
+
+  /**
+   * 按宽高比沿视线后移相机，保证房间（而非外接球）完整入镜。
+   * 盒形用角点投影迭代收紧；球形用解析解（透视下可见轮廓是切线圆）。
+   */
   private fitCamera(width: number, height: number): void {
     const aspect = Math.max(width, 1) / Math.max(height, 1);
     this.camera.aspect = aspect;
-    const halfV = (this.camera.fov * Math.PI) / 360;
-    const halfH = Math.atan(Math.tan(halfV) * aspect);
-    // 取景半径 = fitRadius × 房间外接球系数 × 余量：房间线框必须完整入镜
-    const frameRadius = this.fitRadius * ROOM_BOUND_FACTOR * ROOM_FRAME_MARGIN;
-    const distance = frameRadius / Math.sin(Math.min(halfV, halfH));
-    this.camera.position.copy(CAMERA_DIR).multiplyScalar(distance);
+    let distance: number;
+    if (this.roomShape === "sphere") {
+      distance = fitDistanceForRadius(SPHERE_RADIUS * this.roomScale, FOV_DEG, aspect, FIT_MARGIN);
+    } else {
+      const pts = this.roomPoints;
+      const scratch = this.fitScratch;
+      scratch.length = pts.length;
+      for (let i = 0; i < pts.length; i += 1) scratch[i] = pts[i] * this.roomScale;
+      distance = fitDistanceForPoints(
+        scratch,
+        CAMERA_DIR.x,
+        CAMERA_DIR.y,
+        CAMERA_DIR.z,
+        CAMERA_TARGET.x,
+        CAMERA_TARGET.y,
+        CAMERA_TARGET.z,
+        FOV_DEG,
+        aspect,
+        FIT_MARGIN,
+      );
+    }
+    this.cameraDistance = Math.max(distance, FIT_RADIUS);
+    this.camera.position.copy(CAMERA_DIR).multiplyScalar(this.cameraDistance);
     this.camera.lookAt(CAMERA_TARGET);
     this.camera.updateProjectionMatrix();
+    // 粒子屏幕尺寸随取景距离：微尘在放大后的房间里依旧是同样的视觉大小
+    this.particleMaterial.size = markerWorldRadius(PARTICLE_RADIUS_FRAC, FOV_DEG, this.cameraDistance);
+  }
+
+  // ── 逐帧外观 ───────────────────────────────────────────
+
+  /**
+   * 每帧统一结算标记 / 光晕 / 拖尾的外观：
+   * 屏幕恒定尺寸 → 深度明暗 → 活动可见度，最后摆拖尾。位置变化与相机变化都走这里。
+   */
+  private updateNodeLooks(): void {
+    const cam = this.camera.position;
+    const nodes = this.nodeList;
+    for (let n = 0; n < nodes.length; n += 1) {
+      const node = nodes[n];
+      const p = node.root.position;
+      const d = Math.hypot(p.x - cam.x, p.y - cam.y, p.z - cam.z);
+      const radius = markerWorldRadius(MARKER_RADIUS_FRAC, FOV_DEG, d);
+      const dim = depthDimAt(d, this.cameraDistance, this.fitRadius, DEPTH_DIM_FAR);
+      const vis = node.vis * dim;
+
+      node.root.scale.setScalar(radius / OBJECT_RADIUS_BASE);
+      node.root.visible = vis > 0.001;
+      const body = node.materials[0] as THREE.MeshBasicMaterial;
+      const halo = node.materials[1] as THREE.SpriteMaterial;
+      const trailMat = node.materials[2] as THREE.SpriteMaterial;
+      body.opacity = vis;
+      halo.opacity = HALO_OPACITY * vis;
+      // 拖尾不吃深度明暗：否则尾端更暗，反而读不出运动方向
+      trailMat.opacity = TRAIL_OPACITY * node.vis;
+
+      const showTrail = this.trailMs > 0 && node.moving && node.vis > 0.001;
+      node.trailGroup.visible = showTrail;
+      if (showTrail) this.placeTrail(node, radius);
+      else for (let i = 0; i < node.trail.length; i += 1) node.trail[i].visible = false;
+    }
+  }
+
+  /** 沿时间轴反向采样出拖尾：不早于 trailMs 窗口，且不跨越 jump（否则会拉出假轨迹）。 */
+  private placeTrail(node: ObjectNode, headRadius: number): void {
+    const track = node.track;
+    const trail = node.trail;
+    if (!track || track.length < 2) {
+      for (let i = 0; i < trail.length; i += 1) trail[i].visible = false;
+      return;
+    }
+    const start = trailWindowStart(track, this.timeMs, this.trailMs);
+    const offsets = this.trailOffsets;
+    const span = TRAIL_HEAD_SCALE - TRAIL_TAIL_SCALE;
+    for (let i = 0; i < trail.length; i += 1) {
+      const sprite = trail[i];
+      const tt = this.timeMs + offsets[i];
+      if (tt < start) {
+        sprite.visible = false;
+        continue;
+      }
+      sampleTrackAt(track, tt, this.tmp);
+      sprite.position.set(this.tmp.x, this.tmp.z, -this.tmp.y);
+      const k = trail.length > 1 ? 1 - i / (trail.length - 1) : 1;
+      sprite.scale.setScalar(headRadius * (TRAIL_TAIL_SCALE + span * k));
+      sprite.visible = true;
+    }
   }
 
   private createNode(key: string): ObjectNode {
-    // 高饱和 + 中低明度：相邻对象单凭色相就能分辨，加色光晕也不会把本色洗成白
-    const color = new THREE.Color().setHSL(hueFromKey(key) / 360, 0.85, 0.58);
+    // 哑光色：饱和压到 0.44、明度 0.63 —— 相邻对象仍凭色相可分辨，但不再互相抢戏
+    const color = new THREE.Color().setHSL(hueFromKey(key) / 360, MARKER_SAT, MARKER_LIGHT);
     // transparent 常开：活动门控逐帧改 opacity（=1 时外观与不透明一致）
     const body = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1 });
     const halo = new THREE.SpriteMaterial({
       map: this.glowTexture,
       color,
       transparent: true,
-      opacity: 0.5,
+      opacity: HALO_OPACITY,
       depthTest: false, // 光晕始终叠在小球上，形成柔和外发光
       depthWrite: false,
       blending: THREE.AdditiveBlending,
     });
     const root = new THREE.Mesh(this.sphereGeometry, body);
     const sprite = new THREE.Sprite(halo);
-    sprite.scale.setScalar(OBJECT_RADIUS * 4.5);
+    sprite.scale.setScalar(OBJECT_RADIUS_BASE * HALO_SCALE);
     sprite.renderOrder = 1;
     root.add(sprite);
-    return { root, materials: [body, halo], activity: null };
+
+    // 拖尾 sprite 独立挂在场景上（不挂在 root 下，否则会跟着 root 的屏幕尺寸缩放二重放大）
+    const trailMat = new THREE.SpriteMaterial({
+      map: this.glowTexture,
+      color,
+      transparent: true,
+      opacity: TRAIL_OPACITY,
+      depthTest: false,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    });
+    const trailGroup = new THREE.Group();
+    const trail: THREE.Sprite[] = [];
+    for (let i = 0; i < TRAIL_SAMPLES; i += 1) {
+      const dot = new THREE.Sprite(trailMat);
+      dot.visible = false;
+      trailGroup.add(dot);
+      trail.push(dot);
+    }
+    trailGroup.visible = false;
+    this.scene.add(trailGroup);
+
+    return { root, materials: [body, halo, trailMat], trail, trailGroup, moving: false, vis: 1, activity: null };
   }
 }
