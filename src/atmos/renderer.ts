@@ -40,6 +40,13 @@ const FIT_RADIUS = 1.25;
 // 形成两点透视——最近的竖直棱落在画面中心左侧，视线略向下但无侧倾（lookAt 默认 up）
 const CAMERA_DIR = new THREE.Vector3(-0.47, 0.342, 0.814).normalize();
 const CAMERA_TARGET = new THREE.Vector3(0, 0.05, 0);
+// 相机看向 CAMERA_TARGET 而非原点：球心相对画面轴的横向偏移。球形取景的解析解必须把它算进去，
+// 否则球面一侧会被画幅切掉（盒形走点集迭代，本身已经算准了这个偏移）。
+const TARGET_LATERAL = (() => {
+  const t = CAMERA_TARGET.clone();
+  t.addScaledVector(CAMERA_DIR, -t.dot(CAMERA_DIR));
+  return t.length();
+})();
 const FOV_DEG = 40;
 // 取景余量：贴边后再留 2% 呼吸空间
 const FIT_MARGIN = 1.02;
@@ -470,7 +477,7 @@ export class AtmosRenderer {
     this.camera.aspect = aspect;
     let distance: number;
     if (this.roomShape === "sphere") {
-      distance = fitDistanceForRadius(SPHERE_RADIUS * this.roomScale, FOV_DEG, aspect, FIT_MARGIN);
+      distance = fitDistanceForRadius(SPHERE_RADIUS * this.roomScale, FOV_DEG, aspect, FIT_MARGIN, TARGET_LATERAL);
     } else {
       const pts = this.roomPoints;
       const scratch = this.fitScratch;

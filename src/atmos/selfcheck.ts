@@ -149,7 +149,10 @@ export function runSelfCheck(): void {
   assert(boxExtent <= 1.01, "盒形取景：全部角点入镜（含 1% 收敛余量）");
   assert(boxExtent >= 0.9, "盒形取景足够紧凑（外接球留白已消除）");
 
-  const sphereDist = fitDistanceForRadius(R, 40, aspect, 1.02);
+  // 相机看向 (0, targetY, 0) 而非球心：这点横向偏移也要传给球形取景，否则断言会正确地失败
+  const along = targetY * dy;
+  const lateral = Math.hypot(-along * dx, targetY - along * dy, -along * dz);
+  const sphereDist = fitDistanceForRadius(R, 40, aspect, 1.02, lateral);
   const sphereExtent = ndcExtent(
     sphereRoomPoints(R, 8, 4),
     dx * sphereDist,

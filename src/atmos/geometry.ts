@@ -201,18 +201,30 @@ export function fitDistanceForPoints(
 
 /**
  * 球形房间的解析取景：视锥半角 θ 下，半径 r 的球在距离 r/sin(θ) 处正好内切。
+ * 相机看向 target（不是球心）时，球心相对画面轴的横向偏移 φ 也要算进去：最坏方向上
+ * 要求 θ + φ ≤ half，故按 d = r / sin(half - φ) 迭代两次求解。
  * 比点集迭代更准（透视下可见轮廓是切线圆，略大于表面点），故球形走这条路。
+ *
+ * offset：target 相对球心的横向偏移（世界单位）；0 = 相机正对球心。
  */
 export function fitDistanceForRadius(
   radius: number,
   fovDeg: number,
   aspect: number,
   margin: number,
+  offset = 0,
 ): number {
   const halfV = (fovDeg * Math.PI) / 360;
   const halfH = Math.atan(Math.tan(halfV) * aspect);
   const half = Math.min(halfV, halfH) / margin;
-  return radius / Math.sin(half);
+  let distance = radius / Math.sin(half);
+  for (let i = 0; i < 2; i += 1) {
+    const phi = Math.atan(offset / distance);
+    const angle = half - phi;
+    if (angle <= 0.01) break;
+    distance = radius / Math.sin(angle);
+  }
+  return distance;
 }
 
 // ── 标记尺寸与深度明暗 ─────────────────────────────────
