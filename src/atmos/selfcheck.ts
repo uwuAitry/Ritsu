@@ -87,14 +87,14 @@ export function runSelfCheck(): void {
   assert(visibilityAt(tailActive, 99999, 0) === 1, "越界钳制末窗发声 → 1");
 
   // ── 房间线框 ──
-  const W = 1.75;
-  const D = 1.5;
-  const FLOOR = -1;
-  const TOP = 1;
+  const W = 1.1;
+  const D = 1.1;
+  const FLOOR = -1.1;
+  const TOP = 1.1;
   const HALF_H = (TOP - FLOOR) / 2;
-  const box = boxRoomLines(W, D, 7, 6, FLOOR, TOP);
-  // 地板：8 条沿 x 的竖线 + 7 条沿 z 的横线；墙：5 段 → 共 20 段
-  assert(box.length === 20 * 6, "盒形线框段数 = 8 + 7 + 5 = 20");
+  const box = boxRoomLines(W, D, 4, 4, FLOOR, TOP);
+  // 地板：5 条沿 x 的竖线 + 5 条沿 z 的横线；墙：5 段 → 共 15 段
+  assert(box.length === 15 * 6, "盒形线框段数 = 5 + 5 + 5 = 15");
   let boxHeightsOk = true;
   for (let i = 1; i < box.length; i += 3) {
     if (box[i] !== FLOOR && box[i] !== TOP) boxHeightsOk = false;
@@ -102,7 +102,7 @@ export function runSelfCheck(): void {
   assert(boxHeightsOk, "盒形线框只落在两个高度上（地板 / 顶边）");
   let boxOnGrid = true;
   for (let i = 0; i < box.length; i += 3) {
-    const gi = (box[i] + W) / ((2 * W) / 7);
+    const gi = (box[i] + W) / ((2 * W) / 4);
     if (Math.abs(gi - Math.round(gi)) > 1e-9) boxOnGrid = false;
   }
   assert(boxOnGrid, "盒形线框 x 落在 7 等分格线上");
@@ -118,7 +118,7 @@ export function runSelfCheck(): void {
   }
   assert(cornersOk, "角点到原点距离 = √(w²+h²+d²)");
 
-  const R = 1.8;
+  const R = 1.1;
   const globe = sphereRoomLines(R, 8, 3);
   assert(globe.lines.length > 0 && globe.lines.length % 6 === 0, "球形线框成对端点");
   let onSphere = true;

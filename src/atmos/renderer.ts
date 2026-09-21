@@ -31,8 +31,9 @@ import {
 //    任何「累积型」动画都会让成片与预览不一致。粒子有随机布局，用固定 seed 保证两次运行相同。
 // 2. 所有形状与取景数值都在 geometry.ts 里算（那一侧不依赖 three，可在 CI 裸 Node 下自检）。
 
-// 单位球半径 = ADM 距离 1；对象小球半径（世界单位，固定值——与上一版观感一致）
-const OBJECT_RADIUS = 0.075;
+// 单位球半径 = ADM 距离 1；对象小球半径（世界单位，固定值）。
+// 房间缩到 ADM 尺度后取景距离同步变近，半径按同比例缩小才能保持上一版的屏幕观感（约 9.2px）。
+const OBJECT_RADIUS = 0.063;
 // 需完整入镜的包围球半径下限（单位球 + 光晕余量）
 const FIT_RADIUS = 1.25;
 // 相机方向：原点前左上方。方位角约 30°（偏画面左）、俯角约 20°，
@@ -52,17 +53,19 @@ const EQUATOR_OPACITY = 0.6;
 const LISTENER_COLOR = 0x9fb0c4;
 const LISTENER_OPACITY = 0.32;
 
-// 盒形房间尺寸：7×6 格、间距 0.5。比对象云（单位立方体）明显外扩，
-// 于是对象落在房间半宽的 ~55% 处——不再贴着墙，房间读起来更大。
-const FLOOR_Y = -1; // 单位球最低点，对象漂浮其上方
-const ROOM_TOP_Y = 1;
-const ROOM_HALF_W = 1.75;
-const ROOM_HALF_D = 1.5;
-const GRID_COLS = 7;
-const GRID_ROWS = 6;
+// 盒形房间 = ADM 单位立方体（±1）+ 10% 余量：声床与对象的坐标顶到 ±1 时就贴着墙与角落，
+// 整个房间被声场填满；这点余量让小球不至于压在格线上。格距 0.55 → 4×4 地面格。
+const FLOOR_Y = -1.1;
+const ROOM_TOP_Y = 1.1;
+const ROOM_HALF_W = 1.1;
+const ROOM_HALF_D = 1.1;
+const GRID_COLS = 4;
+const GRID_ROWS = 4;
 
-// 球形房间：半径必须把单位立方体（角点 √3 ≈ 1.73）包进去，否则角落对象会戳出球外
-const SPHERE_RADIUS = 1.8;
+// 球形房间 = ADM 单位球（距离 1）+ 10% 余量，与盒形同一套尺度，声场同样铺满球内。
+// ponytail: 立方体角点位置（|p| > 1.1）会落在球外——球面本就不是立方体的外接面；
+// 需要严格包含单位立方体时，把半径调回 √3 ≈ 1.8。
+const SPHERE_RADIUS = 1.1;
 const SPHERE_MERIDIANS = 8; // 每 45° 一条经线
 const SPHERE_PARALLELS = 3; // → ±45° 两条纬线 + 赤道，稀疏得像地球仪而不是亮笼子
 
@@ -206,7 +209,7 @@ export class AtmosRenderer {
 
     // 原点听者标记：细环，标示听者位置；转平落在 XZ 平面（水平面），既不是音频对象也不是测距标尺
     this.listener = new THREE.Mesh(
-      new THREE.TorusGeometry(0.075, 0.0105, 8, 40),
+      new THREE.TorusGeometry(0.063, 0.0088, 8, 40),
       new THREE.MeshBasicMaterial({
         color: LISTENER_COLOR,
         transparent: true,
