@@ -9,7 +9,6 @@ import { visibilityAt } from "./activity";
 import {
   boxRoomLines,
   boxRoomPoints,
-  depthDimAt,
   fillParticles,
   fitDistanceForPoints,
   fitDistanceForRadius,
@@ -165,19 +164,13 @@ export function runSelfCheck(): void {
   assert(sphereExtent <= 1.0000001, "球形取景：球面点全部入镜");
   assert(sphereExtent > 0.8, "球形取景不过度留白");
 
-  // ── 标记尺寸：恒定在画面上的大小 ──
+  // ── 屏幕尺寸换算：世界半径 = frac × 2·tan(fov/2) × 距离（粒子与拖尾按它换算） ──
   const frac = 0.019;
   const r5 = markerWorldRadius(frac, 40, 5);
   const r10 = markerWorldRadius(frac, 40, 10);
   assert(approx(r10, r5 * 2, 1e-9), "距离翻倍 → 世界半径翻倍（屏幕尺寸恒定）");
   const tanHalf = Math.tan((40 * Math.PI) / 360);
   assert(approx(r5 / (2 * tanHalf * 5), frac, 1e-12), "屏幕半径 / 视口高 = 目标比例");
-
-  // ── 深度明暗：近亮远暗，覆盖全幅 ──
-  assert(approx(depthDimAt(3, 5, 2, 0.62), 1, 1e-9), "深度明暗：近端 = 1");
-  assert(approx(depthDimAt(7, 5, 2, 0.62), 0.62, 1e-9), "深度明暗：远端 = dimFar");
-  assert(approx(depthDimAt(5, 5, 2, 0.62), 1 + (0.62 - 1) * 0.5, 1e-9), "深度明暗：中心取中值");
-  assert(approx(depthDimAt(5, 5, 0, 0.62), 1, 1e-9), "span = 0 → 不做明暗");
 
   // ── 轨迹采样 ──
   const offsets = trailSampleOffsets(500, 6);

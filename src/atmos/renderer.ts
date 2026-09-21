@@ -10,7 +10,6 @@ import { visibilityAt } from "./activity";
 import {
   boxRoomLines,
   boxRoomPoints,
-  depthDimAt,
   fillParticles,
   fitDistanceForPoints,
   fitDistanceForRadius,
@@ -32,10 +31,8 @@ import {
 //    任何「累积型」动画都会让成片与预览不一致。粒子有随机布局，用固定 seed 保证两次运行相同。
 // 2. 所有形状与取景数值都在 geometry.ts 里算（那一侧不依赖 three，可在 CI 裸 Node 下自检）。
 
-// 单位球半径 = ADM 距离 1。以下是「基准半径」，实际缩放由 root.scale 按屏幕尺寸决定。
-const OBJECT_RADIUS_BASE = 0.075;
-// 标记在画面上的半径 / 视口高：恒定值 → 对象云再散、分辨率再高，标记都是同样大小
-const MARKER_RADIUS_FRAC = 0.019;
+// 单位球半径 = ADM 距离 1；对象小球半径（世界单位，固定值——与上一版观感一致）
+const OBJECT_RADIUS = 0.075;
 // 需完整入镜的包围球半径下限（单位球 + 光晕余量）
 const FIT_RADIUS = 1.25;
 // 相机方向：原点前左上方。方位角约 30°（偏画面左）、俯角约 20°，
@@ -69,14 +66,11 @@ const SPHERE_RADIUS = 1.8;
 const SPHERE_MERIDIANS = 8; // 每 45° 一条经线
 const SPHERE_PARALLELS = 3; // → ±45° 两条纬线 + 赤道，稀疏得像地球仪而不是亮笼子
 
-// 深度明暗：近端 1 → 远端 0.62。补回被 depthTest:false 抹平的层次，12+ 对象重叠时读得出前后
-const DEPTH_DIM_FAR = 0.62;
-
 // 标记与光晕
-const MARKER_SAT = 0.44;
-const MARKER_LIGHT = 0.63;
-const HALO_SCALE = 3.8; // 相对标记半径
-const HALO_OPACITY = 0.3;
+const MARKER_SAT = 0.85;
+const MARKER_LIGHT = 0.58;
+const HALO_SCALE = 4.5; // 相对小球半径
+const HALO_OPACITY = 0.5;
 
 // 辉光轨迹：6 个同材质 sprite 沿时间轴反向采样，只做尺寸渐隐（共享材质 → 每节点多 1 个材质）
 // ponytail: 逐点 alpha 需要自定义 shader，这里尺寸渐隐 + 加色叠加已够像彗尾；要更细腻再上 Points + shader
@@ -207,7 +201,7 @@ export class AtmosRenderer {
     this.renderer.setSize(width, height, false);
 
     this.camera = new THREE.PerspectiveCamera(FOV_DEG, 1, 0.1, 50);
-    this.sphereGeometry = new THREE.SphereGeometry(OBJECT_RADIUS_BASE, 16, 12);
+    this.sphereGeometry = new THREE.SphereGeometry(OBJECT_RADIUS, 16, 12);
     this.glowTexture = makeGlowTexture();
 
     // 原点听者标记：细环，标示听者位置；转平落在 XZ 平面（水平面），既不是音频对象也不是测距标尺
@@ -503,21 +497,15 @@ export class AtmosRenderer {
   // ── 逐帧外观 ───────────────────────────────────────────
 
   /**
-   * 每帧统一结算标记 / 光晕 / 拖尾的外观：
-   * 屏幕恒定尺寸 → 深度明暗 → 活动可见度，最后摆拖尾。位置变化与相机变化都走这里。
+   * 每帧统一结算外观：活动可见度 → 小球 / 光晕 / 拖尾。位置变化与相机变化都走这里。
+   * 小球用固定世界半径（与上一版一致），不随取景距离缩放。
    */
   private updateNodeLooks(): void {
-    const cam = this.camera.position;
     const nodes = this.nodeList;
     for (let n = 0; n < nodes.length; n += 1) {
       const node = nodes[n];
-      const p = node.root.position;
-      const d = Math.hypot(p.x - cam.x, p.y - cam.y, p.z - cam.z);
-      const radius = markerWorldRadius(MARKER_RADIUS_FRAC, FOV_DEG, d);
-      const dim = depthDimAt(d, this.cameraDistance, this.fitRadius, DEPTH_DIM_FAR);
-      const vis = node.vis * dim;
+      const vis = node.vis;
 
-      node.root.scale.setScalar(radius / OBJECT_RADIUS_BASE);
       node.root.visible = vis > 0.001;
       const body = node.materials[0] as THREE.MeshBasicMaterial;
       const halo = node.materials[1] as THREE.SpriteMaterial;
@@ -529,13 +517,13 @@ export class AtmosRenderer {
 
       const showTrail = this.trailMs > 0 && node.moving && node.vis > 0.001;
       node.trailGroup.visible = showTrail;
-      if (showTrail) this.placeTrail(node, radius);
+      if (showTrail) this.placeTrail(node);
       else for (let i = 0; i < node.trail.length; i += 1) node.trail[i].visible = false;
     }
   }
 
   /** 沿时间轴反向采样出拖尾：不早于 trailMs 窗口，且不跨越 jump（否则会拉出假轨迹）。 */
-  private placeTrail(node: ObjectNode, headRadius: number): void {
+  private placeTrail(node: ObjectNode): void {
     const track = node.track;
     const trail = node.trail;
     if (!track || track.length < 2) {
@@ -555,7 +543,7 @@ export class AtmosRenderer {
       sampleTrackAt(track, tt, this.tmp);
       sprite.position.set(this.tmp.x, this.tmp.z, -this.tmp.y);
       const k = trail.length > 1 ? 1 - i / (trail.length - 1) : 1;
-      sprite.scale.setScalar(headRadius * (TRAIL_TAIL_SCALE + span * k));
+      sprite.scale.setScalar(OBJECT_RADIUS * (TRAIL_TAIL_SCALE + span * k));
       sprite.visible = true;
     }
   }
@@ -576,7 +564,7 @@ export class AtmosRenderer {
     });
     const root = new THREE.Mesh(this.sphereGeometry, body);
     const sprite = new THREE.Sprite(halo);
-    sprite.scale.setScalar(OBJECT_RADIUS_BASE * HALO_SCALE);
+    sprite.scale.setScalar(OBJECT_RADIUS * HALO_SCALE);
     sprite.renderOrder = 1;
     root.add(sprite);
 

@@ -218,26 +218,14 @@ export function fitDistanceForRadius(
 // ── 标记尺寸与深度明暗 ─────────────────────────────────
 
 /**
- * 让标记在画面上的尺寸恒定：世界半径 = frac × 2·tan(fov/2) × 距离。
+ * 让某个尺寸在画面上的大小恒定：世界半径 = frac × 2·tan(fov/2) × 距离。
  * 推导：屏幕半径/视口高 = worldRadius / (2·tan(fov/2)·d)，令其恒为 frac 即得。
- * 于是对象云越散、相机退得越远，标记也不会缩成小点（可读性的主因）。
+ * 用途：粒子尺寸与拖尾按取景距离换算；对象小球不用它——小球保持固定世界半径。
  */
 export function markerWorldRadius(radiusFrac: number, fovDeg: number, distance: number): number {
   return radiusFrac * 2 * Math.tan((fovDeg * Math.PI) / 360) * distance;
 }
 
-/** 深度明暗：以相机到中心的距离为中心、span 为半幅，近端 1 → 远端 dimFar。 */
-export function depthDimAt(
-  distance: number,
-  centerDistance: number,
-  span: number,
-  dimFar: number,
-): number {
-  if (span <= 0) return 1;
-  const t = (distance - centerDistance) / span;
-  const c = t < -1 ? 0 : t > 1 ? 1 : (t + 1) / 2;
-  return 1 + (dimFar - 1) * c;
-}
 
 // ── 轨迹 ───────────────────────────────────────────────
 
