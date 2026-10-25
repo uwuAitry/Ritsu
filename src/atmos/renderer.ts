@@ -55,8 +55,7 @@ const TARGET_LATERAL = (() => {
 const FOV_DEG = 40;
 const FIT_MARGIN = 1.02;
 
-// ── 色板（对齐官方：深紫夜空 + 紫/青/洋红，绝不出现全色轮）────────────────
-// ── 色板：从整体背景取色，白灰为主，只在极小范围内偏冷 ────────────
+// ── 色板：从整体背景取色，白灰为主，只在极小范围内偏冷 ────
 const MEMBRANE_INNER = new THREE.Color(0x2f333d);
 const MEMBRANE_MID = new THREE.Color(0x8d95a3);
 const MEMBRANE_RIM = new THREE.Color(0xe6ebf3);
@@ -64,7 +63,7 @@ const MEMBRANE_CAUSTIC = new THREE.Color(0xc6cdd8);
 const MEMBRANE_RIM_POWER = 2.4;
 // 声场重心方向的鼓包幅度（相对半径）：越响的方位，膜壳表现得越往外推
 const MEMBRANE_BULGE = 0.16;
-const MEMBRANE_AMP = 0.075;
+const MEMBRANE_AMP = 0.045;
 const MEMBRANE_SEGMENTS_W = 128;
 const MEMBRANE_SEGMENTS_H = 80;
 
@@ -73,18 +72,16 @@ const MARKER_SAT = 0.16;
 const DOT_SCALE = 2.4; // sprite 边长 = OBJECT_RADIUS × 它；贴图 0.4 半径内是实心球核，整块读作「发光球」
 const HALO_SCALE = 2.2;
 const HALO_OPACITY = 0.2;
-const RING_RADIUS = 1.05;
-const RING_TUBE = 0.035;
-const RING_TILT_X = -1.18;
-const RING_TILT_Z = 0.3;
-const RING_OPACITY = 0.7;
+const RING_INNER = 0.55; // 环内沿（相对 sprite 半宽），亮核直径约 0.5，留出间隙
+const RING_OUTER = 0.95; // 环外沿
+const RING_SOFT = 0.35; // 环带的柔边宽度（相对环带厚度）
+const RING_OPACITY = 0.85;
 // 环与辉光随发声强度缩放（直径和粗度同比例跟着变）
 const RING_MIN = 0.7;
 const RING_GAIN = 0.55;
 const HALO_MIN = 0.65;
 const HALO_GAIN = 0.6;
 const DOT_MIN = 0.55;
-
 // ── 彗尾：三角带（对应官方 MeshLine），逐帧按轨迹重算顶点，仍是 timeMs 纯函数 ──
 const TRAIL_SAMPLES = 24;
 const TRAIL_WIDTH_FRAC = 0.42; // 头部半宽 = OBJECT_RADIUS × DOT_SCALE × 它
@@ -131,11 +128,11 @@ const ROOM_HALF_H = (ROOM_TOP_Y - FLOOR_Y) / 2;
 
 type ObjectNode = {
   root: THREE.Group;
-  ring: THREE.Mesh;
+  ring: THREE.Sprite;
   halo: THREE.Sprite;
   dotMat: THREE.SpriteMaterial;
   haloMat: THREE.SpriteMaterial;
-  ringMat: THREE.MeshBasicMaterial;
+  ringMat: THREE.SpriteMaterial;
   trailMat: THREE.ShaderMaterial;
   trailGeo: THREE.BufferGeometry;
   trailMesh: THREE.Mesh;
@@ -273,10 +270,34 @@ function makeGlowTexture(): THREE.CanvasTexture {
   return texture;
 }
 
+// 对象星环：正对相机的柔光环（官方是 Sprite 环，不是 3D torus）。
+// 环带在 RING_INNER..RING_OUTER 之间，两侧 RING_SOFT 宽的羽化。
+function makeRingTexture(): THREE.CanvasTexture {
+  const size = 256;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("AtmosRenderer: 2D canvas context unavailable");
+  const mid = ((RING_INNER + RING_OUTER) / 2) * (size / 2);
+  const half = ((RING_OUTER - RING_INNER) / 2) * (size / 2);
+  const soft = half * RING_SOFT;
+  const g = ctx.createRadialGradient(size / 2, size / 2, mid - half, size / 2, size / 2, mid + half);
+  g.addColorStop(0, "rgba(255,255,255,0)");
+  g.addColorStop(soft / (2 * half), "rgba(255,255,255,1)");
+  g.addColorStop(1 - soft / (2 * half), "rgba(255,255,255,1)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
 // ── 膜壳着色器 ───────────────────────────────────────────────
 // 顶点：三组乘积正弦做不规则边界（有机薄膜），起伏幅度与声场能量挂钩。
-// 片元：双面加色叠加近壁 + 远壁 → 天然出体积；fresnel 出洋红亮边；
-//       内部 fbm 云 + 细丝焦散 → 官方泡内那些扭曲条纹。
+// 片元：双面加色叠加近壁 + 远壁 → 天然出体积；宽窄两层柔边；
+//       低频 fbm 丝绸 + 稀疏柔亮点，整体低对比——对齐官方的柔调。
 // 所有输入都是 position / uTime / uEnergy，因此仍是 timeMs 的纯函数。
 const MEMBRANE_VERT = `
 uniform float uTime;
@@ -358,31 +379,29 @@ void main() {
   float facing = clamp(dot(nrm, viewDir), -1.0, 1.0);
   float edge = 1.0 - abs(facing);
 
-  // 两道边缘光：窄的一圈洋红亮边 + 宽的一层紫色厚膜
-  float rimThin = pow(clamp(edge, 0.0, 1.0), uRimPower);
+  // 柔和的双层边缘光：官方泡的边是「几乎透明的薄边 + 一层宽晕」，不是锐利亮圈
   float rimWide = pow(clamp(edge, 0.0, 1.0), uRimPower * 0.35);
+  float rimThin = pow(clamp(edge, 0.0, 1.0), uRimPower) * (0.55 + 0.45 * uEnergy);
 
-  // 内部云层：缓慢流动的 fbm，能量越高越亮
+  // 内部丝绸：低频 fbm 缓慢流动，幅度小、对比低——只有隐约的流动质感
   vec3 flow = vDirW * 2.4 + vec3(0.0, uTime * 0.035, uTime * 0.02);
   float clouds = fbm(flow) * 0.7 + vNoise * 0.3;
+  float silk = pow(0.5 + 0.5 * sin((clouds * 5.0 + vDirW.y * 1.5) * 6.28318), 3.0) * 0.18;
 
-  // 焦散细丝：高频折叠成正弦再 pow 8 收成细亮线——泡内那些扭曲条纹
-  float band = fbm(vDirW * 3.1 + vec3(uTime * 0.05, 0.0, uTime * 0.03));
-  float caustic = pow(0.5 + 0.5 * sin((band * 7.0 + vDirW.y * 2.4) * 6.28318), 8.0);
+  vec3 col = uInner * (0.35 + 0.45 * clouds);
+  col += uMid * (0.22 + 0.40 * clouds + 0.40 * uEnergy) * (0.45 + 0.55 * rimWide);
+  col += uCaustic * silk * (0.10 + 0.25 * uEnergy) * rimWide;
+  col += uRim * rimThin * 1.1;
 
-  vec3 col = uInner * (0.42 + 0.55 * clouds);
-  col += uMid * (0.30 + 0.55 * clouds + 0.55 * uEnergy) * (0.45 + 0.55 * rimWide);
-  col += uCaustic * caustic * (0.10 + 0.30 * uEnergy) * rimWide;
-  col += uRim * rimThin * 1.6;
+  float alpha = (0.02 + 0.05 * uEnergy) * (1.0 - 0.4 * rimWide)
+              + rimWide * (0.06 + 0.10 * uEnergy)
+              + rimThin * 0.45
+              + silk * 0.05;
 
-  float alpha = (0.035 + 0.10 * uEnergy) * (1.0 - 0.4 * rimWide)
-              + rimWide * (0.10 + 0.16 * uEnergy)
-              + rimThin * 0.85
-              + caustic * 0.06;
-  // 辉光粒子：球面上的稀疏亮点（高频噪声取高次幂），比真粒子省一层 draw call
-  float spark = pow(vnoise(vDirW * 34.0 + vec3(0.0, uTime * 0.9, uTime * 0.4)), 22.0);
-  col += vec3(1.0) * spark * (0.9 + 1.6 * uEnergy);
-  alpha += spark * 0.55;
+  // 辉光粒子：低频噪声取高次幂 + 时间漂移，稀疏柔亮点（不再是硬噪点）
+  float spark = pow(vnoise(vDirW * 9.0 + vec3(uTime * 0.06, uTime * 0.09, uTime * 0.04)), 14.0);
+  col += vec3(1.0) * spark * (0.35 + 0.85 * uEnergy);
+  alpha += spark * 0.30;
 
   gl_FragColor = vec4(col, clamp(alpha, 0.0, 1.0));
 }
@@ -466,6 +485,7 @@ export class AtmosRenderer {
 
   private readonly dotTexture: THREE.CanvasTexture;
   private readonly listenerTexture: THREE.CanvasTexture;
+  private readonly ringTexture: THREE.CanvasTexture;
   private readonly glowTexture: THREE.CanvasTexture;
   private readonly backgroundTexture: THREE.CanvasTexture;
 
@@ -473,7 +493,6 @@ export class AtmosRenderer {
   private readonly membrane: THREE.Mesh;
   private readonly membraneMat: THREE.ShaderMaterial;
   private readonly listener: THREE.Group;
-  private readonly ringGeometry: THREE.BufferGeometry;
 
   private readonly stars: THREE.Points;
   private readonly starMaterial: THREE.PointsMaterial;
@@ -519,6 +538,7 @@ export class AtmosRenderer {
     this.dotTexture = makeDotTexture();
     this.listenerTexture = makeListenerTexture();
     this.glowTexture = makeGlowTexture();
+    this.ringTexture = makeRingTexture();
     this.backgroundTexture = makeBackgroundTexture();
 
     // ── 1. 夜空底：一张径向渐变的 billboard，边缘 alpha 归零 → 不露出矩形边界 ──
@@ -594,7 +614,7 @@ export class AtmosRenderer {
     this.membrane.frustumCulled = false;
     this.scene.add(this.membrane);
 
-    this.ringGeometry = new THREE.TorusGeometry(RING_RADIUS, RING_TUBE, 6, 96);
+    // 对象星环改用 Sprite 贴图环（官方做法），不再建 TorusGeometry
 
     // ── 4. 听者：身后柔光 + 小人剪影 ──
     this.listener = new THREE.Group();
@@ -803,7 +823,7 @@ export class AtmosRenderer {
     this.particleMaterial.dispose();
     this.stars.geometry.dispose();
     this.starMaterial.dispose();
-    this.ringGeometry.dispose();
+    this.ringTexture.dispose();
     this.membrane.geometry.dispose();
     this.membraneMat.dispose();
     (this.background.material as THREE.SpriteMaterial).dispose();
@@ -1006,10 +1026,9 @@ export class AtmosRenderer {
       node.halo.scale.setScalar(OBJECT_RADIUS * DOT_SCALE * HALO_SCALE * (HALO_MIN + HALO_GAIN * level));
       // 环单独呼吸（官方 ring 贴图是分散 tile 的呼吸动画），相位固定在节点上
       const breath = 0.78 + 0.22 * Math.sin(t * 0.004 + node.phase);
-      node.ringMat.opacity = RING_OPACITY * vis * breath * (0.6 + 0.4 * level);
-      // 直径与粗度同时跟着强度变（torus 是共享几何，只能缩放）
+      node.ringMat.opacity = RING_OPACITY * vis * breath * (0.55 + 0.45 * level);
+      // 环直径随强度胀缩；贴图里环带相对宽度固定，直径变大时粗度视觉上也同步变粗
       node.ring.scale.setScalar(OBJECT_RADIUS * DOT_SCALE * (RING_MIN + RING_GAIN * level));
-      node.ring.scale.z *= 0.5 + 1.8 * level;
       node.trailMat.uniforms.uVis.value = vis;
 
       const showTrail = this.trailMs > 0 && node.moving && vis > 0.001;
@@ -1133,21 +1152,19 @@ export class AtmosRenderer {
     halo.renderOrder = 3;
     halo.scale.setScalar(OBJECT_RADIUS * DOT_SCALE * HALO_SCALE);
 
-    // 细环：与球核分离的一圈薄环，透视下自然成椭圆
-    const ringMat = new THREE.MeshBasicMaterial({
+    // 星环：正对相机的柔光环 sprite（官方是 Sprite 环，不是 3D torus）
+    const ringMat = new THREE.SpriteMaterial({
+      map: this.ringTexture,
       color,
       transparent: true,
       opacity: RING_OPACITY,
+      depthTest: true,
       depthWrite: false,
-      side: THREE.DoubleSide,
       blending: THREE.AdditiveBlending,
     });
-    const ring = new THREE.Mesh(this.ringGeometry, ringMat);
+    const ring = new THREE.Sprite(ringMat);
     ring.renderOrder = 3;
-    ring.rotation.x = RING_TILT_X;
-    ring.rotation.z = RING_TILT_Z;
     ring.scale.setScalar(OBJECT_RADIUS * DOT_SCALE);
-
     const root = new THREE.Group();
     root.add(ring);
     root.add(halo);
