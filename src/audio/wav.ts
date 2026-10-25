@@ -200,6 +200,9 @@ export function decodeWavToStereo(
   const bytesPerSample = bitsPerSample / 8;
   const shift = bitsPerSample - validBits;
 
+  // 满刻度 RMS：把窗口 RMS 线性量化到 0..255（门控仍只判 >0）。
+  // ponytail: 单一满刻度值，安静母带的强度会整体偏低；需要按曲目自适应时改成按整曲峰值归一。
+  const ACTIVITY_RMS_FULL = 0.25;
   // 活动检测累加器：逐声道能量平方和，每 100ms 窗 finalize 一次（不需要时零开销）
   const framesPerWindow = Math.max(1, Math.round((info.sampleRate * ACTIVITY_WINDOW_MS) / 1000));
   const sumSq = activityOut ? new Float64Array(channelCount) : null;
@@ -211,7 +214,11 @@ export function decodeWavToStereo(
     for (let c = 0; c < channelCount; c++) {
       const slots = activityOut[c];
       if (slots && windowIndex < slots.length) {
-        slots[windowIndex] = Math.sqrt(sumSq[c] / frames) > ACTIVITY_RMS_THRESHOLD ? 1 : 0;
+        const rms = Math.sqrt(sumSq[c] / frames);
+        slots[windowIndex] =
+          rms > ACTIVITY_RMS_THRESHOLD
+            ? Math.max(1, Math.round(Math.min(1, rms / ACTIVITY_RMS_FULL) * 255))
+            : 0;
       }
       sumSq[c] = 0;
     }

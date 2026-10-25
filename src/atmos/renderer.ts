@@ -6,7 +6,7 @@ import {
   type AtmosRoomShape,
   type AtmosViewOptions,
 } from "../types";
-import { visibilityAt } from "./activity";
+import { levelAt, visibilityAt } from "./activity";
 import {
   boxRoomLines,
   fillParticles,
@@ -21,13 +21,17 @@ import {
   type Vec3Out,
 } from "./geometry";
 
-// AtmosRenderer：ADM 摆位 3D 视图，按 Dolby Atmos Visualizer 的分层配方重建。
+// AtmosRenderer：ADM 摆位 3D 视图，分层配方参照 Dolby Atmos Visualizer，
+// 但配色不抄官方 visualizer——从整体背景取色，白灰为主。
 // 只拥有一个离屏 canvas（不挂载 DOM、不是 React 组件），由 StageRenderer drawImage 到主画布。
 //
-// 官方那套画面的层次（从远到近）：
-//   夜空底（深紫 + 64 道极淡光芒） → 星场 → 发光膜壳（房间本身，双面加色叠加出体积）
+// 层次（从远到近）：
+//   夜空底（暗色径向晕） → 星场 → 发光膜壳（房间本身）
 //   → 听者小人剪影 → 带环行星状对象（亮核 + 软晕 + 细环 + 彗尾）
-// 这里逐层照做。房间不是线框盒——官方没有线框，空间感全靠膜壳提供。
+// 房间不是线框盒——空间感靠膜壳提供；线笼只当极暗的刻度参照。
+//
+// 声场反馈：对象的环/雾/亮度随自身发声强度胀缩；膜壳朝声场重心鼓出；
+// 膜壳表面自带高频噪声辉光粒子。
 //
 // 两条贯穿全文件的约束：
 // 1. 画面必须是 timeMs 的纯函数（无滚动缓冲 / 无墙钟累积 / 无帧计数）——预览与离线逐帧导出共用它。
@@ -52,17 +56,20 @@ const FOV_DEG = 40;
 const FIT_MARGIN = 1.02;
 
 // ── 色板（对齐官方：深紫夜空 + 紫/青/洋红，绝不出现全色轮）────────────────
-const MEMBRANE_INNER = new THREE.Color(0x2a1158);
-const MEMBRANE_MID = new THREE.Color(0x6a35c8);
-const MEMBRANE_RIM = new THREE.Color(0xff5cd6);
-const MEMBRANE_CAUSTIC = new THREE.Color(0x9fd4ff);
+// ── 色板：从整体背景取色，白灰为主，只在极小范围内偏冷 ────────────
+const MEMBRANE_INNER = new THREE.Color(0x2f333d);
+const MEMBRANE_MID = new THREE.Color(0x8d95a3);
+const MEMBRANE_RIM = new THREE.Color(0xe6ebf3);
+const MEMBRANE_CAUSTIC = new THREE.Color(0xc6cdd8);
 const MEMBRANE_RIM_POWER = 2.4;
+// 声场重心方向的鼓包幅度（相对半径）：越响的方位，膜壳表现得越往外推
+const MEMBRANE_BULGE = 0.16;
 const MEMBRANE_AMP = 0.075;
 const MEMBRANE_SEGMENTS_W = 128;
 const MEMBRANE_SEGMENTS_H = 80;
 
 // ── 对象标记：亮核 + 宽软晕 + 细环 ────────────────────────────────
-const MARKER_SAT = 0.85;
+const MARKER_SAT = 0.16;
 const DOT_SCALE = 2.4; // sprite 边长 = OBJECT_RADIUS × 它；贴图 0.4 半径内是实心球核，整块读作「发光球」
 const HALO_SCALE = 2.2;
 const HALO_OPACITY = 0.2;
@@ -71,6 +78,12 @@ const RING_TUBE = 0.035;
 const RING_TILT_X = -1.18;
 const RING_TILT_Z = 0.3;
 const RING_OPACITY = 0.7;
+// 环与辉光随发声强度缩放（直径和粗度同比例跟着变）
+const RING_MIN = 0.7;
+const RING_GAIN = 0.55;
+const HALO_MIN = 0.65;
+const HALO_GAIN = 0.6;
+const DOT_MIN = 0.55;
 
 // ── 彗尾：三角带（对应官方 MeshLine），逐帧按轨迹重算顶点，仍是 timeMs 纯函数 ──
 const TRAIL_SAMPLES = 24;
@@ -118,6 +131,8 @@ const ROOM_HALF_H = (ROOM_TOP_Y - FLOOR_Y) / 2;
 
 type ObjectNode = {
   root: THREE.Group;
+  ring: THREE.Mesh;
+  halo: THREE.Sprite;
   dotMat: THREE.SpriteMaterial;
   haloMat: THREE.SpriteMaterial;
   ringMat: THREE.MeshBasicMaterial;
@@ -127,6 +142,8 @@ type ObjectNode = {
   track?: AdmKeyframe[];
   moving: boolean;
   vis: number;
+  /** 发声强度 0..1（量化 RMS），驱动环径/环粗/辉光 */
+  level: number;
   activity: Uint8Array | null;
   /** 环呼吸的固定相位，保证同一对象每帧相位一致 */
   phase: number;
@@ -138,10 +155,10 @@ function hashKey(key: string): number {
   return h;
 }
 
-// id/name → 稳定色相。官方对象色在紫罗兰到洋红之间（HSL 245°–320°），
-// 按 id 散列到全色轮会把画面拉成彩虹。
+// id/name → 稳定色相。配色不抄官方 visualizer，而是跟整体背景走：
+// 白灰为主，色相锁在冷灰蓝的窄带（200°–260°），饱和度压得很低，只做微弱区分。
 function hueFromKey(key: string): number {
-  return 245 + (hashKey(key) / 100000) * 75;
+  return 200 + (hashKey(key) / 100000) * 60;
 }
 
 // 对象标记贴图：亮核 + 宽软晕（官方 dot 的渐变停点，逐字照搬）。
@@ -175,9 +192,9 @@ function makeBackgroundTexture(): THREE.CanvasTexture {
   if (!ctx) throw new Error("AtmosRenderer: 2D canvas context unavailable");
 
   const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-  g.addColorStop(0, "rgba(10,6,32,0.9)");
-  g.addColorStop(0.6, "rgba(27,22,64,0.6)");
-  g.addColorStop(0.9, "rgba(22,29,57,0)");
+  g.addColorStop(0, "rgba(14,16,22,0.92)");
+  g.addColorStop(0.6, "rgba(26,29,38,0.62)");
+  g.addColorStop(0.9, "rgba(24,27,34,0)");
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, size, size);
 
@@ -265,6 +282,8 @@ const MEMBRANE_VERT = `
 uniform float uTime;
 uniform float uEnergy;
 uniform float uAmp;
+uniform vec3 uFocus;
+uniform float uFocusAmt;
 varying float vNoise;
 varying vec3 vDirW;
 varying vec3 vWorldPos;
@@ -279,7 +298,10 @@ float wobble(vec3 p, float t) {
 void main() {
   vec3 dir = normalize(position);
   float n = wobble(dir, uTime * 0.35);
-  float disp = 1.0 + n * uAmp * (0.55 + uEnergy * 0.90);
+  // 声场方位：uFocus 指向当前声场重心，该侧的膜被推出去
+  float toward = max(dot(dir, uFocus), 0.0);
+  float bulge = uFocusAmt * pow(toward, 3.0);
+  float disp = 1.0 + n * uAmp * (0.55 + uEnergy * 0.90) + bulge;
   vNoise = n;
   vDirW = dir;
   vec4 world = modelMatrix * vec4(dir * disp, 1.0);
@@ -357,6 +379,11 @@ void main() {
               + rimWide * (0.10 + 0.16 * uEnergy)
               + rimThin * 0.85
               + caustic * 0.06;
+  // 辉光粒子：球面上的稀疏亮点（高频噪声取高次幂），比真粒子省一层 draw call
+  float spark = pow(vnoise(vDirW * 34.0 + vec3(0.0, uTime * 0.9, uTime * 0.4)), 22.0);
+  col += vec3(1.0) * spark * (0.9 + 1.6 * uEnergy);
+  alpha += spark * 0.55;
+
   gl_FragColor = vec4(col, clamp(alpha, 0.0, 1.0));
 }
 `;
@@ -544,6 +571,8 @@ export class AtmosRenderer {
         uTime: { value: 0 },
         uEnergy: { value: this.energy },
         uAmp: { value: MEMBRANE_AMP },
+        uFocus: { value: new THREE.Vector3(0, 1, 0) },
+        uFocusAmt: { value: 0 },
         uInner: { value: MEMBRANE_INNER },
         uMid: { value: MEMBRANE_MID },
         uRim: { value: MEMBRANE_RIM },
@@ -650,6 +679,7 @@ export class AtmosRenderer {
           ? channelActivity[obj.channelIndex]
           : undefined;
       node.activity = bound ?? null;
+      node.level = levelAt(node.activity, this.timeMs, ACTIVITY_WINDOW_MS);
       // ADM → Three：three.x = adm.x，three.y = adm.z（上），three.z = -adm.y（前方朝屏幕内）
       node.root.position.set(obj.x, obj.z, -obj.y);
       node.trailMesh.visible = false;
@@ -706,6 +736,8 @@ export class AtmosRenderer {
       if (this.activityEnabled) {
         node.vis = visibilityAt(node.activity, currentTimeMs, this.activityDelayMs, ACTIVITY_WINDOW_MS);
       }
+      // 强度独立于门控：门控只管「藏不藏」，强度一直跟着声场走
+      node.level = levelAt(node.activity, currentTimeMs, ACTIVITY_WINDOW_MS);
       const track = node.track;
       if (track && track.length >= 2) {
         sampleTrackAt(track, currentTimeMs, this.tmp);
@@ -871,6 +903,30 @@ export class AtmosRenderer {
     } else {
       this.energy = 0.4 + 0.3 * (0.5 + 0.5 * Math.sin(this.timeMs * 0.0009));
     }
+
+    // 声场重心：按强度加权的位置方向 → 膜壳朝该侧鼓出
+    let fx = 0;
+    let fy = 0;
+    let fz = 0;
+    let wsum = 0;
+    for (let i = 0; i < nodes.length; i += 1) {
+      const n = nodes[i];
+      const w = n.vis * n.level;
+      if (w <= 0) continue;
+      fx += n.root.position.x * w;
+      fy += n.root.position.y * w;
+      fz += n.root.position.z * w;
+      wsum += w;
+    }
+    const uFocus = this.membraneMat.uniforms.uFocus.value as THREE.Vector3;
+    const flen = Math.hypot(fx, fy, fz);
+    if (wsum > 1e-6 && flen > 1e-6) {
+      uFocus.set(fx / flen, fy / flen, fz / flen);
+      // 重心越偏离球心，方位感越强 → 鼓包幅度跟着偏离程度走
+      this.membraneMat.uniforms.uFocusAmt.value = MEMBRANE_BULGE * Math.min(1, flen / wsum / 0.9);
+    } else {
+      this.membraneMat.uniforms.uFocusAmt.value = 0;
+    }
     this.membraneMat.uniforms.uEnergy.value = this.energy;
     this.membraneMat.uniforms.uTime.value = this.timeMs / 1000;
   }
@@ -942,12 +998,18 @@ export class AtmosRenderer {
       const node = nodes[n];
       const vis = node.vis;
 
+      const level = node.level;
+      // 亮核、外层雾、细环同一套强度驱动：越响越大越亮，环与雾同步胀开
       node.root.visible = vis > 0.001;
-      node.dotMat.opacity = vis;
-      node.haloMat.opacity = HALO_OPACITY * vis;
+      node.dotMat.opacity = vis * (DOT_MIN + (1 - DOT_MIN) * level);
+      node.haloMat.opacity = HALO_OPACITY * vis * (HALO_MIN + HALO_GAIN * level);
+      node.halo.scale.setScalar(OBJECT_RADIUS * DOT_SCALE * HALO_SCALE * (HALO_MIN + HALO_GAIN * level));
       // 环单独呼吸（官方 ring 贴图是分散 tile 的呼吸动画），相位固定在节点上
       const breath = 0.78 + 0.22 * Math.sin(t * 0.004 + node.phase);
-      node.ringMat.opacity = RING_OPACITY * vis * breath;
+      node.ringMat.opacity = RING_OPACITY * vis * breath * (0.6 + 0.4 * level);
+      // 直径与粗度同时跟着强度变（torus 是共享几何，只能缩放）
+      node.ring.scale.setScalar(OBJECT_RADIUS * DOT_SCALE * (RING_MIN + RING_GAIN * level));
+      node.ring.scale.z *= 0.5 + 1.8 * level;
       node.trailMat.uniforms.uVis.value = vis;
 
       const showTrail = this.trailMs > 0 && node.moving && vis > 0.001;
@@ -1040,7 +1102,7 @@ export class AtmosRenderer {
 
   private createNode(key: string): ObjectNode {
     const h = hashKey(key);
-    const color = new THREE.Color().setHSL(hueFromKey(key) / 360, MARKER_SAT, 0.45 + (h % 100) / 400);
+    const color = new THREE.Color().setHSL(hueFromKey(key) / 360, MARKER_SAT, 0.72 + (h % 100) / 400);
     const phase = (h % 628) / 100;
 
     // 亮核
@@ -1111,6 +1173,8 @@ export class AtmosRenderer {
 
     return {
       root,
+      ring,
+      halo,
       dotMat,
       haloMat,
       ringMat,
@@ -1119,6 +1183,7 @@ export class AtmosRenderer {
       trailMesh,
       moving: false,
       vis: 1,
+      level: 1,
       activity: null,
       phase,
     };

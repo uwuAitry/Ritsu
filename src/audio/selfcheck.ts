@@ -211,7 +211,8 @@ export function runSelfCheck(): void {
   const actData: number[] = [];
   for (let f = 0; f < 1600; f++) {
     const l = f < 800 ? 0x4000 : 0x0000; // 16-bit LE：0x4000 = 0.5
-    actData.push(l & 0xff, (l >>> 8) & 0xff, 0x00, 0x00);
+    // ch1 前 800 帧极轻信号（rms ≈ 0.0039，刚过阈值）→ 应量化成小而非满值。
+    actData.push(l & 0xff, (l >>> 8) & 0xff, f < 800 ? 0x80 : 0x00, 0x00);
   }
   const act = buildWav(
     { audioFormat: 1, channelCount: 2, sampleRate: 8000, bitsPerSample: 16 },
@@ -226,9 +227,10 @@ export function runSelfCheck(): void {
   const al = new Float32Array(ai!.frameCount);
   const ar = new Float32Array(ai!.frameCount);
   decodeWavToStereo(act, ai!, al, ar, [a0, a1]);
-  assert(a0[0] === 1, "activity ch0 win0 loud");
+  assert(a0[0] === 255, "activity ch0 win0 saturates");
   assert(a0[1] === 0, "activity ch0 win1 silent");
-  assert(a1[0] === 0 && a1[1] === 0, "activity ch1 all silent");
+  assert(a1[0] > 0 && a1[0] < 64, "activity ch1 win0 graded not binary");
+  assert(a1[1] === 0, "activity ch1 win1 silent");
   // 不传 activityOut 时完全不影响解码结果
   const l2 = new Float32Array(8);
   const r2 = new Float32Array(8);
