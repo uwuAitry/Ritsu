@@ -986,8 +986,8 @@ export default function App() {
             index="04"
             title="导出"
             meta={
-              exportMode === "offline"
               exportMode === "offline" || exportMode === "hdr"
+                ? `${snapEvenSize(outWidth)} × ${snapEvenSize(outHeight)}`
                 : "实时录制"
             }
           >
@@ -1071,11 +1071,11 @@ export default function App() {
                   value={exportProgress * 100}
                   label={exportMode === "offline" || exportMode === "hdr" ? "逐帧编码" : "实时录制"}
                 />
-                {exportMode === "offline" ? (
+                {exportMode === "offline" || exportMode === "hdr" ? (
                   <Button block onClick={() => abortRef.current?.abort()}>
                     取消渲染
                   </Button>
-                {exportMode === "offline" || exportMode === "hdr" ? (
+                ) : null}
               </>
             ) : null}
 
