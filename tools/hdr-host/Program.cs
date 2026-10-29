@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 
@@ -8,9 +9,9 @@ namespace HdrHost;
 
 // HDR10+ 导出主机：raw(gbrp10le) + meta.json -> ffmpeg(libx265) -> hdr10plus_tool inject -> 混流 mp4 -> ffprobe 验收。
 // 只依赖系统 ffmpeg/ffprobe/hdr10plus_tool，无 NuGet 依赖。
-// 两个命令：
 //   encode : 一次性离线（--raw ... --meta ... --out ...）
-//   serve  : 本地 HTTP 流式接收（页面/WebView2 用）：POST /session -> /session/{id}/frames* -> /session/{id}/finish
+//   serve  : 本地 HTTP 流式接收（TcpListener，免 http.sys/管理员）：
+//            POST /session -> /session/{id}/frames* -> /session/{id}/finish
 internal static class Program
 {
     private const string X265Params =
@@ -37,7 +38,7 @@ internal static class Program
                     "usage:\n" +
                     "  HdrHost encode --raw <gbrp10le.bin> --width W --height H --fps F --meta <json> --out <mp4>\n" +
                     "                 [--audio <aac>] [--ffmpeg p] [--ffprobe p] [--tool p] [--work dir]\n" +
-                    "  HdrHost serve  [--port 8712] [--outdir dir] [--ffmpeg p] [--ffprobe p] [--tool p]");
+                    "  HdrHost serve  [--port 8712] [--outdir dir] [--workdir dir] [--ffmpeg p] [--ffprobe p] [--tool p]");
                 return args.Length == 0 ? 2 : 0;
             }
             return args[0] switch
@@ -138,7 +139,7 @@ internal static class Program
         return outPath;
     }
 
-    // ---------------- HTTP serve ----------------
+    // ---------------- HTTP serve (TcpListener, no http.sys) ----------------
 
     private static int Serve(Dictionary<string, string> d)
     {
@@ -147,54 +148,51 @@ internal static class Program
         string ffprobe = d.GetValueOrDefault("ffprobe", SiblingTool(ffmpeg, "ffprobe") ?? "ffprobe");
         string tool = d.GetValueOrDefault("tool", "hdr10plus_tool");
         string outdir = d.GetValueOrDefault("outdir", Path.Combine(Path.GetTempPath(), "hdrhost-out"));
-        string workRoot = Path.Combine(Path.GetTempPath(), "hdrhost-sessions");
+        string workRoot = d.GetValueOrDefault("workdir", Path.Combine(Path.GetTempPath(), "hdrhost-sessions"));
         Directory.CreateDirectory(outdir);
         Directory.CreateDirectory(workRoot);
 
         var sessions = new Dictionary<string, Session>();
-        var listener = new HttpListener();
-        listener.Prefixes.Add($"http://127.0.0.1:{port}/");
-        listener.Start();
+        var tcp = new TcpListener(IPAddress.Loopback, port);
+        tcp.Start();
         Console.WriteLine($"HdrHost serve on http://127.0.0.1:{port}/  outdir={outdir}");
 
         while (true)
         {
-            HttpListenerContext ctx = listener.GetContext();
+            using TcpClient client = tcp.AcceptTcpClient();
             try
             {
-                Handle(ctx, sessions, ffmpeg, ffprobe, tool, outdir, workRoot);
+                using NetworkStream ns = client.GetStream();
+                (string method, string path, Dictionary<string, string> hdr, byte[] body) = ReadRequest(ns);
+                (int code, string ctype, byte[] resp) = Route(method, path, body, sessions, ffmpeg, ffprobe, tool, outdir, workRoot);
+                WriteResponse(ns, code, ctype, resp);
             }
             catch (Exception ex)
             {
-                TryJson(ctx, 500, new { ok = false, error = ex.Message });
+                try
+                {
+                    using NetworkStream ns = client.GetStream();
+                    WriteResponse(ns, 500, "application/json", JsonSerializer.SerializeToUtf8Bytes(new { ok = false, error = ex.Message }));
+                }
+                catch { /* client gone */ }
             }
-            finally
-            {
-                try { ctx.Response.OutputStream.Close(); } catch { /* ignore */ }
-            }
+            finally { try { client.Close(); } catch { } }
         }
     }
 
-    private static void Handle(HttpListenerContext ctx, Dictionary<string, Session> sessions,
-        string ffmpeg, string ffprobe, string tool, string outdir, string workRoot)
+    private static (int, string, byte[]) Route(string method, string path, byte[] body,
+        Dictionary<string, Session> sessions, string ffmpeg, string ffprobe, string tool, string outdir, string workRoot)
     {
-        HttpListenerRequest req = ctx.Request;
-        HttpListenerResponse res = ctx.Response;
-        AddCors(res);
-        if (req.HttpMethod == "OPTIONS") { res.StatusCode = 204; return; }
+        if (method == "OPTIONS") return (204, "text/plain", Array.Empty<byte>());
 
-        string path = req.Url!.AbsolutePath;
         string[] parts = path.Trim('/').Split('/');
 
-        if (req.HttpMethod == "GET" && path == "/health")
-        {
-            WriteText(res, 200, "ok");
-            return;
-        }
+        if (method == "GET" && path == "/health")
+            return (200, "text/plain", Encoding.UTF8.GetBytes("ok"));
 
-        if (req.HttpMethod == "POST" && path == "/session")
+        if (method == "POST" && path == "/session")
         {
-            using var doc = JsonDocument.Parse(req.InputStream);
+            using var doc = JsonDocument.Parse(body);
             JsonElement root = doc.RootElement;
             var s = new Session
             {
@@ -210,20 +208,20 @@ internal static class Program
             File.WriteAllText(s.MetaPath, root.GetProperty("meta").GetRawText());
             using (File.Create(s.RawPath)) { }
             sessions[id] = s;
-            TryJson(res, 200, new { id, frame_bytes = s.W * s.H * 3 * 2 });
-            return;
+            return (200, "application/json",
+                JsonSerializer.SerializeToUtf8Bytes(new { id, frame_bytes = s.W * s.H * 3 * 2 }));
         }
 
         if (parts.Length == 3 && parts[0] == "session" && sessions.TryGetValue(parts[1], out Session? sess))
         {
-            if (parts[2] == "frames" && req.HttpMethod == "POST")
+            if (parts[2] == "frames" && method == "POST")
             {
                 using (var fs = new FileStream(sess.RawPath, FileMode.Append, FileAccess.Write))
-                    req.InputStream.CopyTo(fs);
-                TryJson(res, 200, new { ok = true, size = new FileInfo(sess.RawPath).Length });
-                return;
+                    fs.Write(body, 0, body.Length);
+                return (200, "application/json",
+                    JsonSerializer.SerializeToUtf8Bytes(new { ok = true, size = new FileInfo(sess.RawPath).Length }));
             }
-            if (parts[2] == "finish" && req.HttpMethod == "POST")
+            if (parts[2] == "finish" && method == "POST")
             {
                 long perFrame = (long)sess.W * sess.H * 3 * 2;
                 long size = new FileInfo(sess.RawPath).Length;
@@ -232,46 +230,84 @@ internal static class Program
                 string outPath = Path.Combine(outdir, parts[1] + ".mp4");
                 string file = RunPipeline(sess.RawPath, sess.W, sess.H, sess.Fps, sess.MetaPath, outPath,
                     null, ffmpeg, ffprobe, tool, Path.Combine(workRoot, parts[1]));
-                TryJson(res, 200, new { ok = true, path = file, frames = size / perFrame });
-                return;
+                return (200, "application/json",
+                    JsonSerializer.SerializeToUtf8Bytes(new { ok = true, path = file, frames = size / perFrame }));
             }
         }
 
-        TryJson(res, 404, new { ok = false, error = "not found " + path });
+        return (404, "application/json", JsonSerializer.SerializeToUtf8Bytes(new { ok = false, error = "not found " + path }));
     }
 
-    private static void AddCors(HttpListenerResponse res)
+    private static (string, string, Dictionary<string, string>, byte[]) ReadRequest(NetworkStream s)
     {
-        res.Headers["Access-Control-Allow-Origin"] = "*";
-        res.Headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS";
-        res.Headers["Access-Control-Allow-Headers"] = "Content-Type";
-        res.Headers["Access-Control-Allow-Private-Network"] = "true";
+        var ms = new MemoryStream();
+        var buf = new byte[16384];
+        int hdrEnd = -1;
+        while (hdrEnd < 0)
+        {
+            int n = s.Read(buf, 0, buf.Length);
+            if (n <= 0) throw new Exception("client closed before headers");
+            ms.Write(buf, 0, n);
+            hdrEnd = FindHeaderEnd(ms.GetBuffer(), (int)ms.Length);
+            if (ms.Length > 1 << 20) throw new Exception("headers too large");
+        }
+        byte[] all = ms.GetBuffer();
+        string head = Encoding.ASCII.GetString(all, 0, hdrEnd);
+        int bodyStart = hdrEnd + 4;
+        string[] lines = head.Split("\r\n");
+        string[] reqLine = lines[0].Split(' ');
+        string method = reqLine[0];
+        string path = reqLine[1];
+
+        var hdr = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 1; i < lines.Length; i++)
+        {
+            int c = lines[i].IndexOf(':');
+            if (c > 0) hdr[lines[i][..c].Trim()] = lines[i][(c + 1)..].Trim();
+        }
+
+        long len = hdr.TryGetValue("Content-Length", out string? cl) ? long.Parse(cl, CultureInfo.InvariantCulture) : 0;
+        var body = new byte[(int)len];
+        int have = (int)ms.Length - bodyStart;
+        if (have > 0) Array.Copy(all, bodyStart, body, 0, Math.Min(have, (int)len));
+        int need = (int)len - Math.Min(have, (int)len);
+        int off = Math.Max(0, have);
+        while (need > 0)
+        {
+            int n = s.Read(body, off, need);
+            if (n <= 0) throw new Exception("client closed mid-body");
+            off += n; need -= n;
+        }
+        return (method, path, hdr, body);
+    }
+
+    private static int FindHeaderEnd(byte[] b, int len)
+    {
+        for (int i = 0; i + 3 < len; i++)
+            if (b[i] == '\r' && b[i + 1] == '\n' && b[i + 2] == '\r' && b[i + 3] == '\n') return i;
+        return -1;
+    }
+
+    private static void WriteResponse(NetworkStream s, int code, string ctype, byte[] body)
+    {
+        string reason = code switch { 200 => "OK", 204 => "No Content", 404 => "Not Found", 500 => "Internal Server Error", _ => "OK" };
+        string head =
+            $"HTTP/1.1 {code} {reason}\r\n" +
+            $"Content-Type: {ctype}\r\n" +
+            $"Content-Length: {body.Length}\r\n" +
+            "Access-Control-Allow-Origin: *\r\n" +
+            "Access-Control-Allow-Methods: GET,POST,OPTIONS\r\n" +
+            "Access-Control-Allow-Headers: Content-Type\r\n" +
+            "Access-Control-Allow-Private-Network: true\r\n" +
+            "Connection: close\r\n\r\n";
+        byte[] hb = Encoding.ASCII.GetBytes(head);
+        s.Write(hb, 0, hb.Length);
+        if (body.Length > 0) s.Write(body, 0, body.Length);
+        s.Flush();
     }
 
     private static string FpsText(JsonElement e) =>
         e.ValueKind == JsonValueKind.String ? e.GetString()! : e.GetRawText();
-
-    private static void WriteText(HttpListenerResponse res, int code, string body)
-    {
-        byte[] b = Encoding.UTF8.GetBytes(body);
-        res.StatusCode = code;
-        res.ContentType = "text/plain; charset=utf-8";
-        res.ContentLength64 = b.Length;
-        res.OutputStream.Write(b, 0, b.Length);
-    }
-
-    private static void TryJson(HttpListenerContext ctx, int code, object payload) =>
-        TryJson(ctx.Response, code, payload);
-
-    private static void TryJson(HttpListenerResponse res, int code, object payload)
-    {
-        AddCors(res);
-        byte[] b = JsonSerializer.SerializeToUtf8Bytes(payload);
-        res.StatusCode = code;
-        res.ContentType = "application/json; charset=utf-8";
-        res.ContentLength64 = b.Length;
-        try { res.OutputStream.Write(b, 0, b.Length); } catch { /* client gone */ }
-    }
 
     // ---------------- helpers ----------------
 
