@@ -140,7 +140,7 @@ async function postBytes(host: string, path: string, bytes: Uint8Array): Promise
   const res = await fetch(host + path, {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
-    body: bytes,
+    body: bytes as unknown as BodyInit,
   });
   if (!res.ok) throw new Error(`HdrHost ${path} ${res.status}: ${await res.text()}`);
 }
