@@ -50,7 +50,6 @@ const RESOLUTION_PRESETS = [
   { id: "4k", label: "4K（3840×2160）", width: 3840, height: 2160 },
 ] as const;
 const FPS_CHOICES = [24, 30, 60];
-const FPS_CHOICES = [24, 30, 60];
 const HDR_HOST = "http://127.0.0.1:8712";
 const RESOLUTION_OPTIONS = [
   ...RESOLUTION_PRESETS.map((preset) => ({ value: preset.id, label: preset.label })),
@@ -714,6 +713,70 @@ export default function App() {
     } catch (e) {
       if ((e as Error).name === "AbortError") setError("离线渲染已取消");
       else setError(`离线渲染失败：${errText(e)}`);
+    } finally {
+      offStage.bgCanvas.remove();
+      offStage.dispose();
+      abortRef.current = null;
+      setExporting(false);
+    }
+  };
+
+  // HDR10+ 导出：复用离线逐帧的舞台渲染，把每帧转成 10-bit PQ 流式送给本机 HdrHost，
+  // 由 ffmpeg/libx265 编码 + hdr10plus_tool 注入 ST2094-40 元数据。
+  const exportHdr = async (): Promise<void> => {
+    const engine = engineRef.current;
+    if (!engine || !source) return;
+    const buffer = engine.decodedBuffer;
+    if (!buffer) {
+      setError("音频缓冲尚未就绪，无法 HDR 导出");
+      return;
+    }
+
+    const width = snapEvenSize(outWidth);
+    const height = snapEvenSize(outHeight);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setError(null);
+    setExporting(true);
+    setExportProgress(0);
+    engine.pause();
+
+    const offStage = new StageRenderer(width, height);
+    offStage.setCover(coverImg);
+    offStage.setLyricLines(lines);
+    offStage.setMeta(resolveMeta(metaInput, metaDefault));
+    offStage.setDuration((engine.duration || source.durationSec) * 1000);
+    offStage.setAdm(adm, adm ? admActivityRef.current : null);
+    offStage.setViewOptions({
+      activityEnabled: hideSilent,
+      activityDelayMs: silentDelaySec * 1000,
+      trailMs: trailOn ? trailSec * 1000 : 0,
+      particles: particlesOn,
+    });
+    bgHostRef.current?.appendChild(offStage.bgCanvas);
+
+    try {
+      if (!(await isHdrHostAvailable(HDR_HOST))) {
+        throw new Error(`本机 HdrHost 未运行（${HDR_HOST}），请先启动 tools/hdr-host`);
+      }
+      const durationSec = engine.duration || source.durationSec;
+      const frameCount = Math.max(1, Math.round(durationSec * outFps));
+      const res = await exportHdrStream({
+        canvas: offStage.canvas,
+        renderFrame: (t) => {
+          offStage.setTime(t);
+          offStage.render();
+        },
+        fps: outFps,
+        frameCount,
+        host: HDR_HOST,
+        onProgress: setExportProgress,
+        signal: controller.signal,
+      });
+      setAutoNote(`HDR10+ 已导出：${res.path}（${res.frames} 帧）`);
+    } catch (e) {
+      if ((e as Error).name === "AbortError") setError("HDR 导出已取消");
+      else setError(`HDR 导出失败：${errText(e)}`);
     } finally {
       offStage.bgCanvas.remove();
       offStage.dispose();
