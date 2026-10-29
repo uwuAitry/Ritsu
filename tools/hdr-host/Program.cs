@@ -260,9 +260,11 @@ internal static class Program
         res.OutputStream.Write(b, 0, b.Length);
     }
 
-    private static void TryJson(HttpListenerContext ctx, int code, object payload)
+    private static void TryJson(HttpListenerContext ctx, int code, object payload) =>
+        TryJson(ctx.Response, code, payload);
+
+    private static void TryJson(HttpListenerResponse res, int code, object payload)
     {
-        HttpListenerResponse res = ctx.Response;
         AddCors(res);
         byte[] b = JsonSerializer.SerializeToUtf8Bytes(payload);
         res.StatusCode = code;
