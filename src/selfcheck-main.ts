@@ -6,6 +6,7 @@ import { runSelfCheck as checkLyricLayout } from "./render/selfcheck";
 import { runSelfCheck as checkAtmos } from "./atmos/selfcheck";
 import { runSelfCheck as checkOfflineRender } from "./export/selfcheck";
 import { runSelfCheck as checkHdr10Plus } from "./export/hdr10plus";
+import { runSelfCheck as checkHdrStream } from "./export/hdrStream";
 import { runSelfCheck as checkAutofill } from "./autofill/selfcheck";
 
 // ponytail: lyric/load 的格式探测自检不在此运行。它经 ./lyric/load 顶层 import
@@ -29,6 +30,8 @@ checkOfflineRender();
 console.log("selfcheck: offline-render ok");
 checkHdr10Plus();
 console.log("selfcheck: hdr10plus ok");
+checkHdrStream();
+console.log("selfcheck: hdr-stream ok");
 // autofill/selfcheck 只测归一化/候选挑选/索引行解析等纯函数，对 ./lyric/load 仅 import type，Node 安全。
 checkAutofill();
 console.log("selfcheck: autofill ok");

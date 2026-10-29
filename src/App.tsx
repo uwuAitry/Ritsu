@@ -9,6 +9,7 @@ import "@applemusic-like-lyrics/core/style.css";
 import { AudioEngine } from "./audio/engine";
 import { exportVideo, pickMimeType } from "./export/recorder";
 import { exportOfflineRender, isOfflineRenderSupported } from "./export/offline";
+import { exportHdrStream, isHdrHostAvailable } from "./export/hdrStream";
 import { loadLyricFile, parseLyricsText } from "./lyric/load";
 import {
   bestMetaCandidate,
@@ -49,7 +50,8 @@ const RESOLUTION_PRESETS = [
   { id: "4k", label: "4K（3840×2160）", width: 3840, height: 2160 },
 ] as const;
 const FPS_CHOICES = [24, 30, 60];
-
+const FPS_CHOICES = [24, 30, 60];
+const HDR_HOST = "http://127.0.0.1:8712";
 const RESOLUTION_OPTIONS = [
   ...RESOLUTION_PRESETS.map((preset) => ({ value: preset.id, label: preset.label })),
   { value: "custom", label: "自定义" },
@@ -61,6 +63,7 @@ const FPS_OPTIONS = FPS_CHOICES.map((fps) => ({
 const EXPORT_MODE_OPTIONS = [
   { value: "realtime", label: "实时录制" },
   { value: "offline", label: "离线渲染" },
+  { value: "hdr", label: "HDR10+（本机）" },
 ];
 const LYRIC_SOURCE_OPTIONS = [
   { value: "auto", label: "自动（AMLL → LRCLIB）" },
@@ -186,7 +189,7 @@ export default function App() {
   const [exporting, setExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   // 导出模式与离线参数：realtime = 原实时录制路径，offline = 逐帧编码（WebCodecs + mp4-muxer）
-  const [exportMode, setExportMode] = useState<"realtime" | "offline">("realtime");
+  const [exportMode, setExportMode] = useState<"realtime" | "offline" | "hdr">("realtime");
   const [resPreset, setResPreset] = useState("1080p");
   const [outWidth, setOutWidth] = useState(1920);
   const [outHeight, setOutHeight] = useState(1080);
@@ -731,6 +734,10 @@ export default function App() {
       await exportOffline();
       return;
     }
+    if (exportMode === "hdr") {
+      await exportHdr();
+      return;
+    }
 
     setError(null);
     setExporting(true);
@@ -782,10 +789,12 @@ export default function App() {
       : "等待音频";
   const noteTone = autoNote?.startsWith("已补全") ? "success" : "info";
   const exportLabel =
-    exportMode === "offline"
+    exportMode === "offline" || exportMode === "hdr"
       ? exporting
         ? `渲染中 ${Math.round(exportProgress * 100)}%`
-        : "离线渲染导出"
+        : exportMode === "hdr"
+          ? "HDR10+ 导出"
+          : "离线渲染导出"
       : exporting
         ? `导出中 ${Math.round(exportProgress * 100)}%`
         : "导出视频";
@@ -978,7 +987,7 @@ export default function App() {
             title="导出"
             meta={
               exportMode === "offline"
-                ? `${snapEvenSize(outWidth)} × ${snapEvenSize(outHeight)}`
+              exportMode === "offline" || exportMode === "hdr"
                 : "实时录制"
             }
           >
@@ -988,11 +997,11 @@ export default function App() {
               options={EXPORT_MODE_OPTIONS}
               disabled={locked}
               onChange={(value) =>
-                setExportMode(value === "offline" ? "offline" : "realtime")
+                setExportMode(value === "offline" ? "offline" : value === "hdr" ? "hdr" : "realtime")
               }
             />
 
-            {exportMode === "offline" ? (
+            {exportMode === "offline" || exportMode === "hdr" ? (
               <Reveal>
                 <div className="stack">
                   <div className="meta-row">
@@ -1060,18 +1069,20 @@ export default function App() {
               <>
                 <ProgressBar
                   value={exportProgress * 100}
-                  label={exportMode === "offline" ? "逐帧编码" : "实时录制"}
+                  label={exportMode === "offline" || exportMode === "hdr" ? "逐帧编码" : "实时录制"}
                 />
                 {exportMode === "offline" ? (
                   <Button block onClick={() => abortRef.current?.abort()}>
                     取消渲染
                   </Button>
-                ) : null}
+                {exportMode === "offline" || exportMode === "hdr" ? (
               </>
             ) : null}
 
             <p className="hint">
-              {exportMode === "offline"
+              {exportMode === "hdr"
+                ? `HDR10+ 导出：逐帧转 10-bit PQ 并流式送给本机 HdrHost（${HDR_HOST}），先运行 tools/hdr-host。4K 走 CPU 转换较慢。`
+                : exportMode === "offline"
                 ? offlineSupported
                   ? `离线渲染 ${snapEvenSize(outWidth)}×${snapEvenSize(outHeight)} @ ${outFps}fps，逐帧编码；非 16:9 分辨率会等比居中留黑边。`
                   : "当前浏览器不支持 WebCodecs，离线渲染不可用，请使用实时录制。"

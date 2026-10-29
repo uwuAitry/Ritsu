@@ -203,9 +203,7 @@ internal static class Program
             string id = Guid.NewGuid().ToString("N");
             string dir = Path.Combine(workRoot, id);
             Directory.CreateDirectory(dir);
-            s.MetaPath = Path.Combine(dir, "meta.json");
             s.RawPath = Path.Combine(dir, "frames.raw");
-            File.WriteAllText(s.MetaPath, root.GetProperty("meta").GetRawText());
             using (File.Create(s.RawPath)) { }
             sessions[id] = s;
             return (200, "application/json",
@@ -227,6 +225,14 @@ internal static class Program
                 long size = new FileInfo(sess.RawPath).Length;
                 if (size == 0 || size % perFrame != 0)
                     throw new Exception($"frames size {size} not a multiple of frame size {perFrame}");
+                sess.MetaPath = Path.Combine(workRoot, parts[1], "meta.json");
+                if (body.Length > 0)
+                {
+                    using var mdoc = JsonDocument.Parse(body);
+                    File.WriteAllText(sess.MetaPath, mdoc.RootElement.GetProperty("meta").GetRawText());
+                }
+                if (!File.Exists(sess.MetaPath))
+                    throw new Exception("finish 缺少 meta（请把 HDR10+ JSON 放在请求体 {meta:...}）");
                 string outPath = Path.Combine(outdir, parts[1] + ".mp4");
                 string file = RunPipeline(sess.RawPath, sess.W, sess.H, sess.Fps, sess.MetaPath, outPath,
                     null, ffmpeg, ffprobe, tool, Path.Combine(workRoot, parts[1]));
