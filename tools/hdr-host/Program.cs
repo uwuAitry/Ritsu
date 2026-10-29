@@ -104,7 +104,8 @@ internal static class Program
         }, capture: true);
         Require(frames, "SMPTE2094-40", frames);
 
-        Run(tool, new[] { "extract", "-i", outPath, "-o", roundtrip });
+        // hdr10plus_tool extract 只吃基本流/TS，不吃 mp4；从注入后的 .hevc 回读校验
+        Run(tool, new[] { "extract", "-i", injected, "-o", roundtrip });
         if (!File.Exists(roundtrip) || new FileInfo(roundtrip).Length == 0)
             throw new Exception("hdr10plus_tool extract 未产出有效 JSON");
 
