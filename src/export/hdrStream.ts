@@ -72,38 +72,65 @@ export interface HdrConverted {
 
 export interface HdrFrameConverter {
   readonly backend: "cpu" | "webgpu";
-  convert(canvas: HTMLCanvasElement, peakNits: number): Promise<HdrConverted>;
+  convert(canvas: HTMLCanvasElement, peakNits: number, emissive?: Float32Array | null, emissiveNits?: number): Promise<HdrConverted>;
+}
+
+/** 每像素 nit 直接编码成 gbrp10le（含发光层叠加后的值） */
+export function gbrpFromNits(nits: Float32Array, pixels: number): Uint8Array {
+  const out = new Uint8Array(pixels * 6);
+  const dv = new DataView(out.buffer);
+  for (let p = 0; p < pixels; p += 1) {
+    const r = nitsToPq10(nits[3 * p]) & PQ_CODE_MAX;
+    const g = nitsToPq10(nits[3 * p + 1]) & PQ_CODE_MAX;
+    const b = nitsToPq10(nits[3 * p + 2]) & PQ_CODE_MAX;
+    dv.setUint16(p * 2, g, true);
+    dv.setUint16(pixels * 2 + p * 2, b, true);
+    dv.setUint16(pixels * 4 + p * 2, r, true);
+  }
+  return out;
+}
+
+/**
+ * 浮点发光层（线性 RGBA，可 >1.0）叠到每像素 nit：nits += 线性 * gainNits，夹到 peak。
+ * 全 0 像素跳过。
+ */
+export function applyEmissive(
+  nits: Float32Array,
+  emissive: Float32Array,
+  gainNits: number,
+  peakNits: number,
+): void {
+  const pixels = nits.length / 3;
+  for (let p = 0; p < pixels; p += 1) {
+    const r = emissive[4 * p];
+    const g = emissive[4 * p + 1];
+    const b = emissive[4 * p + 2];
+    if (r === 0 && g === 0 && b === 0) continue;
+    nits[3 * p] = Math.min(peakNits, nits[3 * p] + r * gainNits);
+    nits[3 * p + 1] = Math.min(peakNits, nits[3 * p + 1] + g * gainNits);
+    nits[3 * p + 2] = Math.min(peakNits, nits[3 * p + 2] + b * gainNits);
+  }
 }
 
 /** CPU 转换器：读 2D canvas 像素（sRGB 8bit）→ 线性 nit → PQ → gbrp10le + 统计。 */
 export function createCpuConverter(): HdrFrameConverter {
   return {
     backend: "cpu",
-    async convert(canvas, peakNits) {
+    async convert(canvas, peakNits, emissive, emissiveNits = 900) {
       const w = canvas.width;
       const h = canvas.height;
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
       if (!ctx) throw new Error("HDR 转换：无法获取 2D context");
       const img = ctx.getImageData(0, 0, w, h).data;
       const pixels = w * h;
-      const rgba16 = new Uint16Array(pixels * 4);
       const nitsRgb = new Float32Array(pixels * 3);
       for (let p = 0; p < pixels; p += 1) {
-        const linR = srgbToLinear(img[4 * p] / 255);
-        const linG = srgbToLinear(img[4 * p + 1] / 255);
-        const linB = srgbToLinear(img[4 * p + 2] / 255);
-        const nR = sdrLinearToNits(linR, peakNits);
-        const nG = sdrLinearToNits(linG, peakNits);
-        const nB = sdrLinearToNits(linB, peakNits);
-        nitsRgb[3 * p] = nR;
-        nitsRgb[3 * p + 1] = nG;
-        nitsRgb[3 * p + 2] = nB;
-        rgba16[4 * p] = nitsToPq10(nR);
-        rgba16[4 * p + 1] = nitsToPq10(nG);
-        rgba16[4 * p + 2] = nitsToPq10(nB);
-        rgba16[4 * p + 3] = PQ_CODE_MAX;
+        nitsRgb[3 * p] = sdrLinearToNits(srgbToLinear(img[4 * p] / 255), peakNits);
+        nitsRgb[3 * p + 1] = sdrLinearToNits(srgbToLinear(img[4 * p + 1] / 255), peakNits);
+        nitsRgb[3 * p + 2] = sdrLinearToNits(srgbToLinear(img[4 * p + 2] / 255), peakNits);
       }
-      return { gbrp: gbrpFromRgba16(rgba16, pixels), measure: measureFrameLinear(nitsRgb) };
+      if (emissive) applyEmissive(nitsRgb, emissive, emissiveNits, peakNits);
+      return { gbrp: gbrpFromNits(nitsRgb, pixels), measure: measureFrameLinear(nitsRgb) };
     },
   };
 }
@@ -210,7 +237,7 @@ export async function createWebGpuConverter(): Promise<HdrFrameConverter> {
 
   return {
     backend: "webgpu",
-    async convert(canvas: HTMLCanvasElement, peakNits: number): Promise<HdrConverted> {
+    async convert(canvas: HTMLCanvasElement, peakNits: number, emissive?: Float32Array | null, emissiveNits = 900): Promise<HdrConverted> {
       const w = canvas.width;
       const h = canvas.height;
       const pixels = w * h;
@@ -246,7 +273,8 @@ export async function createWebGpuConverter(): Promise<HdrFrameConverter> {
       const nits = new Float32Array(nitsRead.getMappedRange().slice(0));
       codesRead.unmap();
       nitsRead.unmap();
-      return { gbrp: gbrpFromPacked(codes, pixels), measure: measureFrameLinear(nits) };
+      if (emissive) applyEmissive(nits, emissive, emissiveNits, peakNits);
+      return { gbrp: emissive ? gbrpFromNits(nits, pixels) : gbrpFromPacked(codes, pixels), measure: measureFrameLinear(nits) };
     },
   };
 }
@@ -272,6 +300,10 @@ export interface HdrStreamOptions {
   /** HdrHost 基址，如 http://127.0.0.1:8712 */
   host: string;
   peakNits?: number;
+  /** 浮点发光层来源（线性 RGBA，可 >1.0）；每帧 renderFrame 后调用，返回 null 则该帧无发光层 */
+  emissive?: () => Float32Array | null;
+  /** 发光层线性值 → 额外 nit 的增益（默认 900） */
+  emissiveNits?: number;
   /** 可选：已解码音频缓冲；传入则连同 HDR 视频一起封装成带音轨的 mp4 */
   buffer?: AudioBuffer;
   onProgress?: (fraction: number) => void;
@@ -356,7 +388,8 @@ export async function exportHdrStream(opts: HdrStreamOptions): Promise<HdrStream
   for (let i = 0; i < frameCount; i += 1) {
     if (signal?.aborted) throw new DOMException("HDR 导出已取消", "AbortError");
     renderFrame((i / fps) * 1000);
-    const { gbrp, measure } = await converter.convert(canvas, peakNits);
+    const em = opts.emissive ? opts.emissive() : null;
+    const { gbrp, measure } = await converter.convert(canvas, peakNits, em, opts.emissiveNits ?? 900);
     await postBytes(host, `/session/${id}/frames`, gbrp);
     frames.push({ ...measure, sceneId: 0, sceneFrameIndex: i });
     opts.onProgress?.((i + 1) / frameCount);
@@ -407,4 +440,15 @@ export function runSelfCheck(): void {
   assert(dv2.getUint16(0, true) === 22 && dv2.getUint16(2, true) === 55, "packed G 平面");
   assert(dv2.getUint16(4, true) === 33 && dv2.getUint16(6, true) === 66, "packed B 平面");
   assert(dv2.getUint16(8, true) === 11 && dv2.getUint16(10, true) === 44, "packed R 平面");
+
+  // 发光层叠加：nits += 线性*gain，夹到 peak；空像素不变
+  const ne = new Float32Array([10, 10, 10, 0, 0, 0]);
+  applyEmissive(ne, new Float32Array([0.5, 0, 0, 1, 0, 0, 0, 1]), 900, 1000);
+  assert(Math.abs(ne[0] - 460) < 1e-3, "emissive R 10+0.5*900");
+  assert(ne[3] === 0 && ne[4] === 0, "emissive 空像素不变");
+  // gbrpFromNits：1000nit 三通道等值 → 平面码值一致
+  const gn = gbrpFromNits(new Float32Array([1000, 1000, 1000]), 1);
+  const dvg = new DataView(gn.buffer);
+  const c1000 = nitsToPq10(1000) & PQ_CODE_MAX;
+  assert(dvg.getUint16(0, true) === c1000 && dvg.getUint16(2, true) === c1000, "gbrpFromNits 平面码值");
 }
