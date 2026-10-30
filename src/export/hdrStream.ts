@@ -71,15 +71,15 @@ export interface HdrConverted {
 }
 
 export interface HdrFrameConverter {
-  readonly backend: "cpu";
-  convert(canvas: HTMLCanvasElement, peakNits: number): HdrConverted;
+  readonly backend: "cpu" | "webgpu";
+  convert(canvas: HTMLCanvasElement, peakNits: number): Promise<HdrConverted>;
 }
 
 /** CPU 转换器：读 2D canvas 像素（sRGB 8bit）→ 线性 nit → PQ → gbrp10le + 统计。 */
 export function createCpuConverter(): HdrFrameConverter {
   return {
     backend: "cpu",
-    convert(canvas, peakNits) {
+    async convert(canvas, peakNits) {
       const w = canvas.width;
       const h = canvas.height;
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
@@ -107,6 +107,161 @@ export function createCpuConverter(): HdrFrameConverter {
     },
   };
 }
+/** packed 10bit 码值（G | B<<10 | R<<20）→ gbrp10le 字节流（小端），返回 G,B,R 平面交错 */
+export function gbrpFromPacked(packed: Uint32Array, pixels: number): Uint8Array {
+  const out = new Uint8Array(pixels * 6);
+  const dv = new DataView(out.buffer);
+  for (let p = 0; p < pixels; p += 1) {
+    const v = packed[p];
+    const g = v & PQ_CODE_MAX;
+    const b = (v >>> 10) & PQ_CODE_MAX;
+    const r = (v >>> 20) & PQ_CODE_MAX;
+    dv.setUint16(p * 2, g, true);
+    dv.setUint16(pixels * 2 + p * 2, b, true);
+    dv.setUint16(pixels * 4 + p * 2, r, true);
+  }
+  return out;
+}
+
+// WebGPU 计算着色器：sRGB 8bit → 线性 → 绝对亮度(nit) → PQ，全程 f32；输出 packed 10bit 码值
+// + 每像素 nit（CPU 侧做精确百分位统计）。数值与 CPU 转换器逐行一致，须同步修改。
+// ponytail: 源仍是 8bit 2D 画布；把舞台本身画到 rgba16float 才是真正全链路浮点（后续）。
+const HDR_WGSL = `
+struct Params { width: u32, height: u32, peak: f32, pad: f32 };
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> codes: array<u32>;
+@group(0) @binding(2) var<storage, read_write> nits: array<f32>;
+@group(0) @binding(3) var<uniform> p: Params;
+
+fn srgb_to_linear(c: f32) -> f32 {
+  if (c <= 0.04045) { return c / 12.92; }
+  return pow((c + 0.055) / 1.055, 2.4);
+}
+fn sdr_to_nits(lin: f32) -> f32 {
+  let base = clamp(lin, 0.0, 1.0) * 100.0;
+  let e = max(0.0, (lin - 0.7) / 0.3);
+  let boost = e * e * (p.peak - 100.0);
+  return min(p.peak, base + boost);
+}
+fn pq_inv(n: f32) -> f32 {
+  let y = clamp(n / 10000.0, 0.0, 1.0);
+  let ym = pow(y, 2610.0 / 16384.0);
+  let num = 3424.0 / 4096.0 + (2413.0 / 4096.0 * 32.0) * ym;
+  let den = 1.0 + (2392.0 / 4096.0 * 32.0) * ym;
+  return pow(num / den, (2523.0 / 4096.0) * 128.0);
+}
+fn pq10(n: f32) -> u32 { return u32(round(pq_inv(n) * 1023.0)); }
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  if (gid.x >= p.width || gid.y >= p.height) { return; }
+  let idx = gid.y * p.width + gid.x;
+  let t = textureLoad(src, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
+  let nr = sdr_to_nits(srgb_to_linear(t.r));
+  let ng = sdr_to_nits(srgb_to_linear(t.g));
+  let nb = sdr_to_nits(srgb_to_linear(t.b));
+  nits[idx * 3u] = nr;
+  nits[idx * 3u + 1u] = ng;
+  nits[idx * 3u + 2u] = nb;
+  codes[idx] = (pq10(ng) & 1023u) | ((pq10(nb) & 1023u) << 10u) | ((pq10(nr) & 1023u) << 20u);
+}
+`;
+
+// WebGPU 类型未随 TS lib.dom 提供，内部用宽松类型承接 device/buffer（对外 API 仍强类型）。
+type GpuAny = any;
+
+/** WebGPU 转换器：PQ 颜色管线在 compute shader 内以 f32 完成。需在有 navigator.gpu 的浏览器调用。 */
+export async function createWebGpuConverter(): Promise<HdrFrameConverter> {
+  const gpu = (navigator as unknown as { gpu?: GpuAny }).gpu;
+  if (!gpu) throw new Error("WebGPU 不可用（navigator.gpu 缺失）");
+  const adapter = await gpu.requestAdapter();
+  if (!adapter) throw new Error("WebGPU 无可请求的 adapter");
+  const device: GpuAny = await adapter.requestDevice();
+  const GU = globalThis as unknown as GpuAny;
+  const module = device.createShaderModule({ code: HDR_WGSL });
+  const pipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "main" } });
+
+  let tex: GpuAny = null;
+  let uni: GpuAny = null;
+  let codesBuf: GpuAny = null;
+  let nitsBuf: GpuAny = null;
+  let codesRead: GpuAny = null;
+  let nitsRead: GpuAny = null;
+  let curW = 0;
+  let curH = 0;
+
+  const ensure = (w: number, h: number): void => {
+    if (w === curW && h === curH) return;
+    for (const b of [tex, uni, codesBuf, nitsBuf, codesRead, nitsRead]) if (b) b.destroy();
+    curW = w;
+    curH = h;
+    const pixels = w * h;
+    tex = device.createTexture({
+      size: { width: w, height: h },
+      format: "rgba8unorm",
+      usage: GU.GPUTextureUsage.COPY_DST | GU.GPUTextureUsage.TEXTURE_BINDING | GU.GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    uni = device.createBuffer({ size: 16, usage: GU.GPUBufferUsage.UNIFORM | GU.GPUBufferUsage.COPY_DST });
+    codesBuf = device.createBuffer({ size: pixels * 4, usage: GU.GPUBufferUsage.STORAGE | GU.GPUBufferUsage.COPY_SRC });
+    nitsBuf = device.createBuffer({ size: pixels * 12, usage: GU.GPUBufferUsage.STORAGE | GU.GPUBufferUsage.COPY_SRC });
+    codesRead = device.createBuffer({ size: pixels * 4, usage: GU.GPUBufferUsage.COPY_DST | GU.GPUBufferUsage.MAP_READ });
+    nitsRead = device.createBuffer({ size: pixels * 12, usage: GU.GPUBufferUsage.COPY_DST | GU.GPUBufferUsage.MAP_READ });
+  };
+
+  return {
+    backend: "webgpu",
+    async convert(canvas: HTMLCanvasElement, peakNits: number): Promise<HdrConverted> {
+      const w = canvas.width;
+      const h = canvas.height;
+      const pixels = w * h;
+      ensure(w, h);
+      device.queue.copyExternalImageToTexture({ source: canvas, flipY: false }, { texture: tex }, { width: w, height: h });
+      const ub = new ArrayBuffer(16);
+      const udv = new DataView(ub);
+      udv.setUint32(0, w, true);
+      udv.setUint32(4, h, true);
+      udv.setFloat32(8, peakNits, true);
+      device.queue.writeBuffer(uni, 0, ub);
+      const bindGroup = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: tex.createView() },
+          { binding: 1, resource: { buffer: codesBuf } },
+          { binding: 2, resource: { buffer: nitsBuf } },
+          { binding: 3, resource: { buffer: uni } },
+        ],
+      });
+      const enc = device.createCommandEncoder();
+      const pass = enc.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
+      pass.end();
+      enc.copyBufferToBuffer(codesBuf, 0, codesRead, 0, pixels * 4);
+      enc.copyBufferToBuffer(nitsBuf, 0, nitsRead, 0, pixels * 12);
+      device.queue.submit([enc.finish()]);
+      await codesRead.mapAsync(GU.GPUMapMode.READ);
+      await nitsRead.mapAsync(GU.GPUMapMode.READ);
+      const codes = new Uint32Array(codesRead.getMappedRange().slice(0));
+      const nits = new Float32Array(nitsRead.getMappedRange().slice(0));
+      codesRead.unmap();
+      nitsRead.unmap();
+      return { gbrp: gbrpFromPacked(codes, pixels), measure: measureFrameLinear(nits) };
+    },
+  };
+}
+
+/** 优先 WebGPU（PQ 在 shader 内），不可用或初始化失败则回退 CPU。 */
+export async function createBestConverter(): Promise<HdrFrameConverter> {
+  try {
+    if ((navigator as unknown as { gpu?: unknown }).gpu) {
+      return await createWebGpuConverter();
+    }
+  } catch (e) {
+    console.warn("HDR: WebGPU 转换器初始化失败，回退 CPU", e);
+  }
+  return createCpuConverter();
+}
 
 export interface HdrStreamOptions {
   canvas: HTMLCanvasElement;
@@ -126,6 +281,8 @@ export interface HdrStreamOptions {
 export interface HdrStreamResult {
   path: string;
   frames: number;
+  /** 实际使用的转换后端（cpu / webgpu） */
+  backend: string;
 }
 
 async function postJson(host: string, path: string, payload: unknown): Promise<Record<string, unknown>> {
@@ -176,7 +333,7 @@ async function postPcm(host: string, path: string, stereo: AudioBuffer, signal?:
 }
 
 /**
- * 逐帧渲染 → CPU/PQ 转换 → 流式 POST 到 HdrHost → finish 时提交 HDR10+ 元数据。
+ * 逐帧渲染 → WebGPU/CPU PQ 转换 → 流式 POST 到 HdrHost → finish 时提交 HDR10+ 元数据。
  * 单场景（sceneFrameIndex=帧内序号），符合现有"一条音频导一个视频"的用法。
  */
 export async function exportHdrStream(opts: HdrStreamOptions): Promise<HdrStreamResult> {
@@ -193,13 +350,13 @@ export async function exportHdrStream(opts: HdrStreamOptions): Promise<HdrStream
   }
   const session = await postJson(host, "/session", sessionPayload);
   const id = String(session.id);
-  const converter = createCpuConverter();
+  const converter = await createBestConverter();
   const frames: Hdr10PlusFrame[] = [];
 
   for (let i = 0; i < frameCount; i += 1) {
     if (signal?.aborted) throw new DOMException("HDR 导出已取消", "AbortError");
     renderFrame((i / fps) * 1000);
-    const { gbrp, measure } = converter.convert(canvas, peakNits);
+    const { gbrp, measure } = await converter.convert(canvas, peakNits);
     await postBytes(host, `/session/${id}/frames`, gbrp);
     frames.push({ ...measure, sceneId: 0, sceneFrameIndex: i });
     opts.onProgress?.((i + 1) / frameCount);
@@ -212,7 +369,7 @@ export async function exportHdrStream(opts: HdrStreamOptions): Promise<HdrStream
 
   const meta = buildHdr10PlusJson(frames);
   const fin = await postJson(host, `/session/${id}/finish`, { meta });
-  return { path: String(fin.path), frames: Number(fin.frames) };
+  return { path: String(fin.path), frames: Number(fin.frames), backend: converter.backend };
 }
 
 export function runSelfCheck(): void {
@@ -243,4 +400,11 @@ export function runSelfCheck(): void {
   assert(dv.getUint16(4, true) === 33 && dv.getUint16(6, true) === 66, "B 平面");
   assert(dv.getUint16(8, true) === 11 && dv.getUint16(10, true) === 44, "R 平面");
   assert(gbrp.length === 2 * 6, "gbrp 长度 = 像素*6");
+  // packed(G|B<<10|R<<20) → gbrp 平面顺序与 gbrpFromRgba16 一致
+  const pk = new Uint32Array([22 | (33 << 10) | (11 << 20), 55 | (66 << 10) | (44 << 20)]);
+  const gbrp2 = gbrpFromPacked(pk, 2);
+  const dv2 = new DataView(gbrp2.buffer);
+  assert(dv2.getUint16(0, true) === 22 && dv2.getUint16(2, true) === 55, "packed G 平面");
+  assert(dv2.getUint16(4, true) === 33 && dv2.getUint16(6, true) === 66, "packed B 平面");
+  assert(dv2.getUint16(8, true) === 11 && dv2.getUint16(10, true) === 44, "packed R 平面");
 }

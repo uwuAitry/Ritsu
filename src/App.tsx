@@ -774,7 +774,7 @@ export default function App() {
         onProgress: setExportProgress,
         signal: controller.signal,
       });
-      setAutoNote(`HDR10+ 已导出：${res.path}（${res.frames} 帧）`);
+      setAutoNote(`HDR10+ 已导出：${res.path}（${res.frames} 帧，转换后端 ${res.backend}）`);
     } catch (e) {
       if ((e as Error).name === "AbortError") setError("HDR 导出已取消");
       else setError(`HDR 导出失败：${errText(e)}`);
