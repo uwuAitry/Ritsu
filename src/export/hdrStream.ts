@@ -12,6 +12,7 @@ import {
   type Hdr10PlusFrame,
   type Hdr10PlusFrameMeasure,
 } from "./hdr10plus";
+import { renderStereo } from "./offline";
 
 const PQ_M1 = 2610 / 16384;
 const PQ_M2 = (2523 / 4096) * 128;
@@ -116,6 +117,8 @@ export interface HdrStreamOptions {
   /** HdrHost 基址，如 http://127.0.0.1:8712 */
   host: string;
   peakNits?: number;
+  /** 可选：已解码音频缓冲；传入则连同 HDR 视频一起封装成带音轨的 mp4 */
+  buffer?: AudioBuffer;
   onProgress?: (fraction: number) => void;
   signal?: AbortSignal;
 }
@@ -155,6 +158,23 @@ export async function isHdrHostAvailable(host: string): Promise<boolean> {
   }
 }
 
+async function postPcm(host: string, path: string, stereo: AudioBuffer, signal?: AbortSignal): Promise<void> {
+  const left = stereo.getChannelData(0);
+  const right = stereo.numberOfChannels > 1 ? stereo.getChannelData(1) : left;
+  const total = stereo.length;
+  const framesPerChunk = 1 << 17; // ≤1MB/块（交错立体声 f32le，小端）
+  for (let off = 0; off < total; off += framesPerChunk) {
+    if (signal?.aborted) throw new DOMException("HDR 导出已取消", "AbortError");
+    const n = Math.min(framesPerChunk, total - off);
+    const interleaved = new Float32Array(n * 2);
+    for (let i = 0; i < n; i += 1) {
+      interleaved[2 * i] = left[off + i];
+      interleaved[2 * i + 1] = right[off + i];
+    }
+    await postBytes(host, path, new Uint8Array(interleaved.buffer));
+  }
+}
+
 /**
  * 逐帧渲染 → CPU/PQ 转换 → 流式 POST 到 HdrHost → finish 时提交 HDR10+ 元数据。
  * 单场景（sceneFrameIndex=帧内序号），符合现有"一条音频导一个视频"的用法。
@@ -166,7 +186,12 @@ export async function exportHdrStream(opts: HdrStreamOptions): Promise<HdrStream
   const width = canvas.width;
   const height = canvas.height;
 
-  const session = await postJson(host, "/session", { width, height, fps });
+  const sessionPayload: Record<string, unknown> = { width, height, fps };
+  if (opts.buffer) {
+    sessionPayload.audio_rate = opts.buffer.sampleRate;
+    sessionPayload.audio_channels = 2;
+  }
+  const session = await postJson(host, "/session", sessionPayload);
   const id = String(session.id);
   const converter = createCpuConverter();
   const frames: Hdr10PlusFrame[] = [];
@@ -178,6 +203,11 @@ export async function exportHdrStream(opts: HdrStreamOptions): Promise<HdrStream
     await postBytes(host, `/session/${id}/frames`, gbrp);
     frames.push({ ...measure, sceneId: 0, sceneFrameIndex: i });
     opts.onProgress?.((i + 1) / frameCount);
+  }
+
+  if (opts.buffer) {
+    const stereo = await renderStereo(opts.buffer);
+    await postPcm(host, `/session/${id}/audio`, stereo, signal);
   }
 
   const meta = buildHdr10PlusJson(frames);

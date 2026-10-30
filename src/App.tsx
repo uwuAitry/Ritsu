@@ -769,6 +769,7 @@ export default function App() {
         },
         fps: outFps,
         frameCount,
+        buffer,
         host: HDR_HOST,
         onProgress: setExportProgress,
         signal: controller.signal,

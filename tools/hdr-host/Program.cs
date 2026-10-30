@@ -26,6 +26,9 @@ internal static class Program
         public string Fps = "24";
         public string MetaPath = "";
         public string RawPath = "";
+        public int AudioRate;
+        public int AudioChannels;
+        public string AudioPath = "";
     }
 
     private static int Main(string[] args)
@@ -199,12 +202,19 @@ internal static class Program
                 W = root.GetProperty("width").GetInt32(),
                 H = root.GetProperty("height").GetInt32(),
                 Fps = FpsText(root.GetProperty("fps")),
+                AudioRate = root.TryGetProperty("audio_rate", out JsonElement ar) ? ar.GetInt32() : 0,
+                AudioChannels = root.TryGetProperty("audio_channels", out JsonElement ac) ? ac.GetInt32() : 0,
             };
             string id = Guid.NewGuid().ToString("N");
             string dir = Path.Combine(workRoot, id);
             Directory.CreateDirectory(dir);
             s.RawPath = Path.Combine(dir, "frames.raw");
             using (File.Create(s.RawPath)) { }
+            if (s.AudioRate > 0 && s.AudioChannels > 0)
+            {
+                s.AudioPath = Path.Combine(dir, "audio.pcm");
+                using (File.Create(s.AudioPath)) { }
+            }
             sessions[id] = s;
             return (200, "application/json",
                 JsonSerializer.SerializeToUtf8Bytes(new { id, frame_bytes = s.W * s.H * 3 * 2 }));
@@ -218,6 +228,14 @@ internal static class Program
                     fs.Write(body, 0, body.Length);
                 return (200, "application/json",
                     JsonSerializer.SerializeToUtf8Bytes(new { ok = true, size = new FileInfo(sess.RawPath).Length }));
+            }
+            if (parts[2] == "audio" && method == "POST")
+            {
+                if (string.IsNullOrEmpty(sess.AudioPath)) throw new Exception("会话未声明音频");
+                using (var fs = new FileStream(sess.AudioPath, FileMode.Append, FileAccess.Write))
+                    fs.Write(body, 0, body.Length);
+                return (200, "application/json",
+                    JsonSerializer.SerializeToUtf8Bytes(new { ok = true, size = new FileInfo(sess.AudioPath).Length }));
             }
             if (parts[2] == "finish" && method == "POST")
             {
@@ -234,8 +252,17 @@ internal static class Program
                 if (!File.Exists(sess.MetaPath))
                     throw new Exception("finish 缺少 meta（请把 HDR10+ JSON 放在请求体 {meta:...}）");
                 string outPath = Path.Combine(outdir, parts[1] + ".mp4");
+                string? audioAac = null;
+                if (!string.IsNullOrEmpty(sess.AudioPath) && File.Exists(sess.AudioPath)
+                    && new FileInfo(sess.AudioPath).Length > 0)
+                {
+                    if (sess.AudioRate <= 0 || sess.AudioChannels <= 0)
+                        throw new Exception("音频会话缺少 audio_rate/audio_channels");
+                    audioAac = Path.Combine(workRoot, parts[1], "audio.m4a");
+                    EncodePcmToAac(sess.AudioPath, sess.AudioRate, sess.AudioChannels, audioAac, ffmpeg);
+                }
                 string file = RunPipeline(sess.RawPath, sess.W, sess.H, sess.Fps, sess.MetaPath, outPath,
-                    null, ffmpeg, ffprobe, tool, Path.Combine(workRoot, parts[1]));
+                    audioAac, ffmpeg, ffprobe, tool, Path.Combine(workRoot, parts[1]));
                 return (200, "application/json",
                     JsonSerializer.SerializeToUtf8Bytes(new { ok = true, path = file, frames = size / perFrame }));
             }
@@ -333,6 +360,17 @@ internal static class Program
             return File.Exists(candidate) ? candidate : null;
         }
         catch { return null; }
+    }
+
+    private static void EncodePcmToAac(string pcm, int rate, int ch, string outAac, string ffmpeg)
+    {
+        Run(ffmpeg, new[]
+        {
+            "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "f32le", "-ar", rate.ToString(CultureInfo.InvariantCulture),
+            "-ac", ch.ToString(CultureInfo.InvariantCulture), "-i", pcm,
+            "-c:a", "aac", "-b:a", "192k", outAac
+        });
     }
 
     private static string Run(string exe, IEnumerable<string> argList, bool capture = false)
