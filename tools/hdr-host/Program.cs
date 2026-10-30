@@ -4,7 +4,8 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
-
+using System.Windows.Forms;
+using Microsoft.Web.WebView2.WinForms;
 namespace HdrHost;
 
 // HDR10+ 导出主机：raw(gbrp10le) + meta.json -> ffmpeg(libx265) -> hdr10plus_tool inject -> 混流 mp4 -> ffprobe 验收。
@@ -31,6 +32,7 @@ internal static class Program
         public string AudioPath = "";
     }
 
+    [STAThread]
     private static int Main(string[] args)
     {
         try
@@ -41,13 +43,15 @@ internal static class Program
                     "usage:\n" +
                     "  HdrHost encode --raw <gbrp10le.bin> --width W --height H --fps F --meta <json> --out <mp4>\n" +
                     "                 [--audio <aac>] [--ffmpeg p] [--ffprobe p] [--tool p] [--work dir]\n" +
-                    "  HdrHost serve  [--port 8712] [--outdir dir] [--workdir dir] [--ffmpeg p] [--ffprobe p] [--tool p]");
+                    "  HdrHost serve  [--port 8712] [--outdir dir] [--workdir dir] [--wwwroot dir] [--ffmpeg p] [--ffprobe p] [--tool p]\n" +
+                    "  HdrHost app    [--port 8712] [--wwwroot dir] [--ffmpeg p] [--ffprobe p] [--tool p]  (WebView2 窗口)");
                 return args.Length == 0 ? 2 : 0;
             }
             return args[0] switch
             {
                 "encode" => Encode(Parse(args)),
                 "serve" => Serve(Parse(args)),
+                "app" => App(Parse(args)),
                 _ => Fail($"unknown command: {args[0]}")
             };
         }
@@ -146,20 +150,35 @@ internal static class Program
 
     private static int Serve(Dictionary<string, string> d)
     {
+        StartServer(d);
+        Thread.Sleep(Timeout.Infinite);
+        return 0;
+    }
+
+    private static (int port, string outdir, string workRoot, string? wwwroot) StartServer(Dictionary<string, string> d)
+    {
         int port = int.Parse(d.GetValueOrDefault("port", "8712"), CultureInfo.InvariantCulture);
         string ffmpeg = d.GetValueOrDefault("ffmpeg", "ffmpeg");
         string ffprobe = d.GetValueOrDefault("ffprobe", SiblingTool(ffmpeg, "ffprobe") ?? "ffprobe");
         string tool = d.GetValueOrDefault("tool", "hdr10plus_tool");
         string outdir = d.GetValueOrDefault("outdir", Path.Combine(Path.GetTempPath(), "hdrhost-out"));
         string workRoot = d.GetValueOrDefault("workdir", Path.Combine(Path.GetTempPath(), "hdrhost-sessions"));
+        string wwwroot = d.GetValueOrDefault("wwwroot", Path.Combine(AppContext.BaseDirectory, "wwwroot"));
+        string? www = Directory.Exists(wwwroot) ? wwwroot : null;
         Directory.CreateDirectory(outdir);
         Directory.CreateDirectory(workRoot);
 
-        var sessions = new Dictionary<string, Session>();
         var tcp = new TcpListener(IPAddress.Loopback, port);
         tcp.Start();
-        Console.WriteLine($"HdrHost serve on http://127.0.0.1:{port}/  outdir={outdir}");
+        var th = new Thread(() => AcceptLoop(tcp, ffmpeg, ffprobe, tool, outdir, workRoot, www)) { IsBackground = true };
+        th.Start();
+        Console.WriteLine($"HdrHost serve on http://127.0.0.1:{port}/  outdir={outdir} wwwroot={www ?? "(none)"}");
+        return (port, outdir, workRoot, www);
+    }
 
+    private static void AcceptLoop(TcpListener tcp, string ffmpeg, string ffprobe, string tool, string outdir, string workRoot, string? wwwroot)
+    {
+        var sessions = new Dictionary<string, Session>();
         while (true)
         {
             using TcpClient client = tcp.AcceptTcpClient();
@@ -167,7 +186,7 @@ internal static class Program
             {
                 using NetworkStream ns = client.GetStream();
                 (string method, string path, Dictionary<string, string> hdr, byte[] body) = ReadRequest(ns);
-                (int code, string ctype, byte[] resp) = Route(method, path, body, sessions, ffmpeg, ffprobe, tool, outdir, workRoot);
+                (int code, string ctype, byte[] resp) = Route(method, path, body, sessions, ffmpeg, ffprobe, tool, outdir, workRoot, wwwroot);
                 WriteResponse(ns, code, ctype, resp);
             }
             catch (Exception ex)
@@ -177,16 +196,19 @@ internal static class Program
                     using NetworkStream ns = client.GetStream();
                     WriteResponse(ns, 500, "application/json", JsonSerializer.SerializeToUtf8Bytes(new { ok = false, error = ex.Message }));
                 }
-                catch { /* client gone */ }
+                catch { }
             }
             finally { try { client.Close(); } catch { } }
         }
     }
 
     private static (int, string, byte[]) Route(string method, string path, byte[] body,
-        Dictionary<string, Session> sessions, string ffmpeg, string ffprobe, string tool, string outdir, string workRoot)
+        Dictionary<string, Session> sessions, string ffmpeg, string ffprobe, string tool, string outdir, string workRoot, string? wwwroot)
     {
         if (method == "OPTIONS") return (204, "text/plain", Array.Empty<byte>());
+
+        if (method == "GET" && wwwroot is not null && path != "/health" && !path.StartsWith("/session", StringComparison.Ordinal))
+            return ServeStatic(wwwroot, path);
 
         string[] parts = path.Trim('/').Split('/');
 
@@ -269,6 +291,65 @@ internal static class Program
         }
 
         return (404, "application/json", JsonSerializer.SerializeToUtf8Bytes(new { ok = false, error = "not found " + path }));
+    }
+
+    private static (int, string, byte[]) ServeStatic(string root, string path)
+    {
+        string p = path;
+        int q = p.IndexOf('?');
+        if (q >= 0) p = p[..q];
+        if (p == "/") p = "/Ritsu/";
+        if (p.EndsWith("/", StringComparison.Ordinal)) p += "index.html";
+        string rel = p.TrimStart('/').Replace('/', Path.DirectorySeparatorChar);
+        string rootFull = Path.GetFullPath(root);
+        string full = Path.GetFullPath(Path.Combine(rootFull, rel));
+        if (!full.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase) || !File.Exists(full))
+            return (404, "text/plain", Encoding.UTF8.GetBytes("not found"));
+        return (200, Mime(full), File.ReadAllBytes(full));
+    }
+
+    private static string Mime(string f) => Path.GetExtension(f).ToLowerInvariant() switch
+    {
+        ".html" => "text/html; charset=utf-8",
+        ".js" or ".mjs" => "text/javascript; charset=utf-8",
+        ".css" => "text/css; charset=utf-8",
+        ".json" => "application/json",
+        ".svg" => "image/svg+xml",
+        ".png" => "image/png",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".webp" => "image/webp",
+        ".woff2" => "font/woff2",
+        ".woff" => "font/woff",
+        ".ttf" => "font/ttf",
+        ".map" => "application/json",
+        ".wasm" => "application/wasm",
+        _ => "application/octet-stream"
+    };
+
+    private static int App(Dictionary<string, string> d)
+    {
+        var (port, _, _, _) = StartServer(d);
+        string url = $"http://127.0.0.1:{port}/Ritsu/";
+        WaitForServer(port);
+        var form = new Form { Text = "Ritsu · HDR10+ 导出", Width = 1280, Height = 820, StartPosition = FormStartPosition.CenterScreen };
+        var wv = new WebView2 { Dock = DockStyle.Fill };
+        form.Controls.Add(wv);
+        form.Load += async (_, _) =>
+        {
+            try { await wv.EnsureCoreWebView2Async(null); wv.CoreWebView2.Navigate(url); }
+            catch (Exception ex) { MessageBox.Show("WebView2 初始化失败：" + ex.Message); form.Close(); }
+        };
+        Application.Run(form);
+        return 0;
+    }
+
+    private static void WaitForServer(int port)
+    {
+        for (int i = 0; i < 50; i++)
+        {
+            try { using var c = new TcpClient(); c.Connect(IPAddress.Loopback, port); return; }
+            catch { Thread.Sleep(100); }
+        }
     }
 
     private static (string, string, Dictionary<string, string>, byte[]) ReadRequest(NetworkStream s)
