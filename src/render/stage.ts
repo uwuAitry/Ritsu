@@ -26,20 +26,20 @@ const TIME_FONT = `18px ${FONT_STACK}`;
 const EMPTY_FONT = `18px ${FONT_STACK}`;
 
 // ---- 构图常量（1920×1080）----
-// 封面：左对齐 150–550，上缘 180 / 下缘 580。
-// 下缘 580 距歌词字顶（约 784）留出阴影尾巴空间，且让开右侧空间面板。
-const COVER_SIZE = 400;
+// 封面：左对齐 150–600，上缘 180 / 下缘 630。
+// 下缘 630 距歌词字顶（约 784）留出阴影尾巴空间，且让开右侧空间面板（下缘 730）。
+const COVER_SIZE = 450;
 const COVER_X = 150;
 const COVER_Y = 180;
 const COVER_RADIUS = 24;
 
-// 空间视图离屏尺寸：与面板内的绘制区域（720×585）一致，drawImage 无变形
-const ATMOS_W = 720;
-const ATMOS_H = 585;
+// 空间视图离屏尺寸：与面板内的绘制区域（800×650）一致，drawImage 无变形
+const ATMOS_W = 800;
+const ATMOS_H = 650;
 
-// 空间面板位置：横向靠右；纵向与封面中线对齐（380），面板自身也居中于此
-const ATMOS_X = 1100;
-const ATMOS_Y = COVER_Y + COVER_SIZE / 2 - ATMOS_H / 2; // 380 - 292.5 = 87.5
+// 空间面板位置：横向靠右；纵向与封面中线对齐（405），面板自身也居中于此
+const ATMOS_X = 1010;
+const ATMOS_Y = COVER_Y + COVER_SIZE / 2 - ATMOS_H / 2; // 405 - 325 = 80
 
 // 无 ADM 时的静默提示：画在空间面板正中
 const EMPTY_TEXT = "未检测到 ADM 空间音频";
