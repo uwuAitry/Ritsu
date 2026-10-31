@@ -264,17 +264,13 @@ export async function createWebGpuConverter(): Promise<HdrFrameConverter> {
       pass.setBindGroup(0, bindGroup);
       pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
       pass.end();
-      enc.copyBufferToBuffer(codesBuf, 0, codesRead, 0, pixels * 4);
       enc.copyBufferToBuffer(nitsBuf, 0, nitsRead, 0, pixels * 12);
       device.queue.submit([enc.finish()]);
-      await codesRead.mapAsync(GU.GPUMapMode.READ);
       await nitsRead.mapAsync(GU.GPUMapMode.READ);
-      const codes = new Uint32Array(codesRead.getMappedRange().slice(0));
       const nits = new Float32Array(nitsRead.getMappedRange().slice(0));
-      codesRead.unmap();
       nitsRead.unmap();
       if (emissive) applyEmissive(nits, emissive, emissiveNits, peakNits);
-      return { gbrp: emissive ? gbrpFromNits(nits, pixels) : gbrpFromPacked(codes, pixels), measure: measureFrameLinear(nits) };
+      return { gbrp: gbrpFromNits(nits, pixels), measure: measureFrameLinear(nits) };
     },
   };
 }
