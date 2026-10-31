@@ -14,6 +14,11 @@ export interface StageMeta {
 const W = 1920;
 const H = 1080;
 
+/** sRGB 8bit(0..1) → 线性（发光层用） */
+function srgbToLinear(c: number): number {
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
 const FONT_STACK = "system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC', sans-serif";
 const TITLE_FONT = `bold 34px ${FONT_STACK}`;
 const ARTIST_FONT = `22px ${FONT_STACK}`;
@@ -71,6 +76,7 @@ export class StageRenderer {
 
   private readonly ctx: CanvasRenderingContext2D;
   private readonly atmos: AtmosRenderer;
+  private emissiveCanvas: HTMLCanvasElement | null = null;
 
   // 输出尺寸 / 缩放：canvas = 请求的输出分辨率（预览为 1920×1080），布局坐标不变。
   // 等比 s = min(outW/1920, outH/1080) 后居中：非 16:9 的目标分辨率留黑边，不拉伸变形。
@@ -316,6 +322,53 @@ export class StageRenderer {
   // 空间面板：无边框、无标签、无底色——摆位视图直接浮在流体背景上。
   // 不裁剪也不画圆角：Atmos 画布整幅透明（clearColor alpha=0）且对象远在边缘之内，
   // 圆角裁剪只会切到透明像素；边框没了，也没有需要圆角对齐的框。
+  /**
+   * 浮点发光层（R2）：把 atmos 粒子云按与 drawAtmosPanel 相同的变换重画到透明离屏画布，
+   * 读回线性 float RGBA（可 >1.0，由调用方增益）。无 ADM 返回 null。须在 render() 后调用。
+   */
+  getEmissiveFloat(): Float32Array | null {
+    const lyricIdx = this.lastLineIndex;
+    const hasLyric = lyricIdx >= 0;
+    if (!this.adm && !hasLyric) return null;
+    const w = this.canvas.width;
+    const h = this.canvas.height;
+    let ec = this.emissiveCanvas;
+    if (!ec) {
+      ec = document.createElement("canvas");
+      ec.width = w;
+      ec.height = h;
+      this.emissiveCanvas = ec;
+    }
+    const ectx = ec.getContext("2d", { willReadFrequently: true });
+    if (!ectx) return null;
+    ectx.setTransform(1, 0, 0, 1, 0, 0);
+    ectx.clearRect(0, 0, w, h);
+    ectx.setTransform(this.scale, 0, 0, this.scale, this.offsetX, this.offsetY);
+    if (this.adm) ectx.drawImage(this.atmos.canvas, ATMOS_X, ATMOS_Y, ATMOS_W, ATMOS_H);
+    if (hasLyric) {
+      const progress = clamp((this.timeMs - this.lineChangeMs) / LYRIC_ANIM_MS, 0, 1);
+      drawLyricLine(
+        ectx,
+        this.lines[lyricIdx],
+        this.timeMs,
+        { x: 110, y: 830, maxWidth: 900 },
+        { progress },
+        { scale: this.scale },
+      );
+    }
+    const img = ectx.getImageData(0, 0, w, h).data;
+    const out = new Float32Array(w * h * 4);
+    for (let i = 0; i < w * h; i += 1) {
+      const a = img[4 * i + 3] / 255;
+      if (a === 0) continue;
+      out[4 * i] = srgbToLinear(img[4 * i] / 255) * a;
+      out[4 * i + 1] = srgbToLinear(img[4 * i + 1] / 255) * a;
+      out[4 * i + 2] = srgbToLinear(img[4 * i + 2] / 255) * a;
+      out[4 * i + 3] = a;
+    }
+    return out;
+  }
+
   private drawAtmosPanel(ctx: CanvasRenderingContext2D): void {
     if (this.adm) {
       this.atmos.render();

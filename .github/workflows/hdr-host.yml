@@ -1,0 +1,37 @@
+name: hdr-host
+
+on:
+  push:
+    paths:
+      - "tools/hdr-host/**"
+      - "src/**"
+      - "package.json"
+      - ".github/workflows/hdr-host.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Build web app
+        run: |
+          npm install
+          npm run build
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Publish host
+        run: dotnet publish tools/hdr-host/HdrHost.csproj -c Release -r win-x64 --self-contained false -o publish
+      - name: Stage web assets
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path publish/wwwroot | Out-Null
+          Copy-Item -Recurse -Force dist publish/wwwroot/Ritsu
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hdr-app-win-x64
+          path: publish

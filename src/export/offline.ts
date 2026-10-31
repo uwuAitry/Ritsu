@@ -350,7 +350,7 @@ export async function exportOfflineRender(opts: OfflineRenderOptions): Promise<B
 }
 
 /** 解码缓冲 → 立体声（多声道按 Web Audio 标准规则下混，与实时导出一致） */
-async function renderStereo(buffer: AudioBuffer): Promise<AudioBuffer> {
+export async function renderStereo(buffer: AudioBuffer): Promise<AudioBuffer> {
   const length = Math.max(1, Math.ceil(buffer.duration * buffer.sampleRate));
   const ctx = new OfflineAudioContext(2, length, buffer.sampleRate);
   const source = ctx.createBufferSource();
