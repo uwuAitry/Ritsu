@@ -58,8 +58,8 @@ const CLOUD_RADIUS = 0.92;
 // 标记与光晕
 const MARKER_SAT = 0.72;
 const MARKER_LIGHT = 0.62;
-const HALO_SCALE = 4.5; // 相对小球半径
-const HALO_OPACITY = 0.5;
+const HALO_SCALE = 2.8; // 相对小球半径
+const HALO_OPACITY = 0.26;
 
 // 辉光轨迹：6 个同材质 sprite 沿时间轴反向采样，只做尺寸渐隐（共享材质 → 每节点多 1 个材质）
 // ponytail: 逐点 alpha 需要自定义 shader，这里尺寸渐隐 + 加色叠加已够像彗尾；要更细腻再上 Points + shader
@@ -88,14 +88,14 @@ const LEVEL_SMOOTH_WINDOWS = 3;
 const BODY_MIN = 0.82;
 const BODY_GAIN = 0.34;
 const HALO_MIN = 0.6;
-const HALO_GAIN = 0.8;
+const HALO_GAIN = 0.45;
 
 // 定向脉冲：声源方向在球面上每 RIPPLE_PERIOD_MS 推出一团柔光并消散。
 // 扁平 2.5D：用 sprite（永远正对相机）；不画描边、不给鼓包描轮廓线（用户明确不要包络线）。
 const RIPPLE_PERIOD_MS = 1400;
 const RIPPLE_START = 0.34; // 起始直径（相对球半径）
 const RIPPLE_GROW = 1.05; // 一个周期内直径增量（相对球半径）
-const RIPPLE_OPACITY = 0.5;
+const RIPPLE_OPACITY = 0.14;
 
 // 定向粒子喷发：爆发方向沿法线喷出一小簇，随脉冲一起散开
 const BURST_PER_DIR = 14;
@@ -216,8 +216,8 @@ void main() {
   for (int i = 0; i < ${MAX_SOURCES}; i++) {
     float w = pow(max(dot(dir, uDir[i]), 0.0), uLobePow) * uEnergy[i];
     push += w;
-    // 山蜂尖顶混入声源对象的淡色，远处看就是“声音把云顶起来了”。
-    tint = mix(tint, uSlotColor[i], clamp(w * 2.4, 0.0, 0.8));
+    // 山峰尖顶混入声源淡色：加强到 3.2×，让颜色沿云层铺开，而不是只在对象周围留一个光点。
+    tint = mix(tint, uSlotColor[i], clamp(w * 3.2, 0.0, 0.9));
   }
   // 多源叠加会超过 1：夹住，保证最坏情况也不超过取景用的 (1 + CLOUD_BULGE) 半径
   push = min(push, 1.0);
@@ -234,9 +234,9 @@ void main() {
 
   vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
   gl_Position = projectionMatrix * mvPosition;
-  gl_PointSize = aSize * uPointScale * (uCamDist / max(-mvPosition.z, 0.001)) * (1.0 + push * 0.75);
+  gl_PointSize = aSize * uPointScale * (uCamDist / max(-mvPosition.z, 0.001)) * (1.0 + push * 1.45);
   vColor = tint;
-  vAlpha = aAlpha * uOpacity * (0.55 + 0.8 * push);
+  vAlpha = aAlpha * uOpacity * (0.45 + 1.25 * push);
 }
 `;
 
@@ -698,7 +698,7 @@ export class AtmosRenderer {
       dirs[slot].set(px / len, py / len, pz / len);
       energy[slot] = level;
       // 山尖混入对象自己的淡色：近处看是「这团声音顶起来的山」，远处看也不抢对象本体。
-      const tint = paleTint(node.color.r * 255, node.color.g * 255, node.color.b * 255, 0.78);
+      const tint = paleTint(node.color.r * 255, node.color.g * 255, node.color.b * 255, 0.6);
       colors[slot].set(tint[0], tint[1], tint[2]);
     }
 
@@ -864,7 +864,7 @@ export class AtmosRenderer {
     const body = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 1 });
     const halo = new THREE.SpriteMaterial({
       map: this.glowTexture,
-      color,
+      color: 0xffffff, // 统一柔白边：单点不再各自染色发光
       transparent: true,
       opacity: HALO_OPACITY,
       depthTest: false, // 光晕始终叠在小球上，形成柔和外发光
