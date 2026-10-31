@@ -8,6 +8,7 @@
 import {
   buildHdr10PlusJson,
   measureFrameLinear,
+  measureFromHistogram,
   nitsToPq10,
   type Hdr10PlusFrame,
   type Hdr10PlusFrameMeasure,
@@ -72,7 +73,7 @@ export interface HdrConverted {
 
 export interface HdrFrameConverter {
   readonly backend: "cpu" | "webgpu";
-  convert(canvas: HTMLCanvasElement, peakNits: number, emissive?: Float32Array | null, emissiveNits?: number): Promise<HdrConverted>;
+  convert(canvas: HTMLCanvasElement, peakNits: number, emissiveCanvas?: HTMLCanvasElement | null, emissiveNits?: number): Promise<HdrConverted>;
 }
 
 /** 每像素 nit 直接编码成 gbrp10le（含发光层叠加后的值） */
@@ -116,7 +117,7 @@ export function applyEmissive(
 export function createCpuConverter(): HdrFrameConverter {
   return {
     backend: "cpu",
-    async convert(canvas, peakNits, emissive, emissiveNits = 900) {
+    async convert(canvas, peakNits, emissiveCanvas, emissiveNits = 900) {
       const w = canvas.width;
       const h = canvas.height;
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
@@ -129,7 +130,22 @@ export function createCpuConverter(): HdrFrameConverter {
         nitsRgb[3 * p + 1] = sdrLinearToNits(srgbToLinear(img[4 * p + 1] / 255), peakNits);
         nitsRgb[3 * p + 2] = sdrLinearToNits(srgbToLinear(img[4 * p + 2] / 255), peakNits);
       }
-      if (emissive) applyEmissive(nitsRgb, emissive, emissiveNits, peakNits);
+      if (emissiveCanvas) {
+        const ectx = emissiveCanvas.getContext("2d", { willReadFrequently: true });
+        if (ectx) {
+          const eimg = ectx.getImageData(0, 0, w, h).data;
+          const ef = new Float32Array(pixels * 4);
+          for (let p = 0; p < pixels; p += 1) {
+            const a = eimg[4 * p + 3] / 255;
+            if (a === 0) continue;
+            ef[4 * p] = srgbToLinear(eimg[4 * p] / 255) * a;
+            ef[4 * p + 1] = srgbToLinear(eimg[4 * p + 1] / 255) * a;
+            ef[4 * p + 2] = srgbToLinear(eimg[4 * p + 2] / 255) * a;
+            ef[4 * p + 3] = a;
+          }
+          applyEmissive(nitsRgb, ef, emissiveNits, peakNits);
+        }
+      }
       return { gbrp: gbrpFromNits(nitsRgb, pixels), measure: measureFrameLinear(nitsRgb) };
     },
   };
@@ -150,15 +166,23 @@ export function gbrpFromPacked(packed: Uint32Array, pixels: number): Uint8Array 
   return out;
 }
 
-// WebGPU 计算着色器：sRGB 8bit → 线性 → 绝对亮度(nit) → PQ，全程 f32；输出 packed 10bit 码值
-// + 每像素 nit（CPU 侧做精确百分位统计）。数值与 CPU 转换器逐行一致，须同步修改。
+// WebGPU 计算着色器：sRGB 8bit → 线性 → 绝对亮度(nit) → PQ（全程 f32）；同时
+// (a) 输出 packed 10bit 码值供 CPU 打包 gbrp；(b) 用直方图 + atomicMax/Add 在 GPU 上做亮度
+// 统计（每帧只回读 ~4KB，不再回读 24.9MB nits）；(c) 可选把发光层纹理按 线性光*增益 叠加。
+// 数值与 CPU 转换器逐行一致，须同步修改。
 // ponytail: 源仍是 8bit 2D 画布；把舞台本身画到 rgba16float 才是真正全链路浮点（后续）。
 const HDR_WGSL = `
-struct Params { width: u32, height: u32, peak: f32, pad: f32 };
+struct Params {
+  width: u32, height: u32, peak: f32, pad: f32,
+  hasEmis: u32, gain: f32, pad2: u32, pad3: u32,
+};
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var<storage, read_write> codes: array<u32>;
-@group(0) @binding(2) var<storage, read_write> nits: array<f32>;
+@group(0) @binding(2) var<storage, read_write> hist: array<atomic<u32>>;
 @group(0) @binding(3) var<uniform> p: Params;
+@group(0) @binding(4) var<storage, read_write> stats: array<atomic<u32>>;
+@group(0) @binding(5) var emiss: texture_2d<f32>;
+@group(0) @binding(6) var emsamp: sampler;
 
 fn srgb_to_linear(c: f32) -> f32 {
   if (c <= 0.04045) { return c / 12.92; }
@@ -184,20 +208,32 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x >= p.width || gid.y >= p.height) { return; }
   let idx = gid.y * p.width + gid.x;
   let t = textureLoad(src, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
-  let nr = sdr_to_nits(srgb_to_linear(t.r));
-  let ng = sdr_to_nits(srgb_to_linear(t.g));
-  let nb = sdr_to_nits(srgb_to_linear(t.b));
-  nits[idx * 3u] = nr;
-  nits[idx * 3u + 1u] = ng;
-  nits[idx * 3u + 2u] = nb;
+  var nr = sdr_to_nits(srgb_to_linear(t.r));
+  var ng = sdr_to_nits(srgb_to_linear(t.g));
+  var nb = sdr_to_nits(srgb_to_linear(t.b));
+  if (p.hasEmis == 1u) {
+    let uv = (vec2<f32>(f32(gid.x) + 0.5, f32(gid.y) + 0.5)) / vec2<f32>(f32(p.width), f32(p.height));
+    let e = textureSampleLevel(emiss, emsamp, uv, 0.0);
+    nr = min(p.peak, nr + srgb_to_linear(e.r) * e.a * p.gain);
+    ng = min(p.peak, ng + srgb_to_linear(e.g) * e.a * p.gain);
+    nb = min(p.peak, nb + srgb_to_linear(e.b) * e.a * p.gain);
+  }
   codes[idx] = (pq10(ng) & 1023u) | ((pq10(nb) & 1023u) << 10u) | ((pq10(nr) & 1023u) << 20u);
+  atomicMax(&stats[0], u32(round(clamp(nr, 0.0, 10000.0) * 10.0)));
+  atomicMax(&stats[1], u32(round(clamp(ng, 0.0, 10000.0) * 10.0)));
+  atomicMax(&stats[2], u32(round(clamp(nb, 0.0, 10000.0) * 10.0)));
+  let l = max(nr, max(ng, nb));
+  atomicAdd(&stats[3], u32(round(l / 32.0)));
+  var bin = u32((l / 10000.0) * 1024.0);
+  bin = min(bin, 1023u);
+  atomicAdd(&hist[bin], 1u);
 }
 `;
 
 // WebGPU 类型未随 TS lib.dom 提供，内部用宽松类型承接 device/buffer（对外 API 仍强类型）。
 type GpuAny = any;
 
-/** WebGPU 转换器：PQ 颜色管线在 compute shader 内以 f32 完成。需在有 navigator.gpu 的浏览器调用。 */
+/** WebGPU 转换器：PQ + 亮度统计 + 发光层叠加全在 compute shader 内完成。需在有 navigator.gpu 的浏览器调用。 */
 export async function createWebGpuConverter(): Promise<HdrFrameConverter> {
   const gpu = (navigator as unknown as { gpu?: GpuAny }).gpu;
   if (!gpu) throw new Error("WebGPU 不可用（navigator.gpu 缺失）");
@@ -207,19 +243,26 @@ export async function createWebGpuConverter(): Promise<HdrFrameConverter> {
   const GU = globalThis as unknown as GpuAny;
   const module = device.createShaderModule({ code: HDR_WGSL });
   const pipeline = device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "main" } });
+  const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
+  const HIST_BINS = 1024;
+  const zeroHist = new Uint32Array(HIST_BINS);
+  const zeroStats = new Uint32Array(4);
 
   let tex: GpuAny = null;
+  let emissTex: GpuAny = null;
   let uni: GpuAny = null;
   let codesBuf: GpuAny = null;
-  let nitsBuf: GpuAny = null;
+  let histBuf: GpuAny = null;
+  let statsBuf: GpuAny = null;
   let codesRead: GpuAny = null;
-  let nitsRead: GpuAny = null;
+  let histRead: GpuAny = null;
+  let statsRead: GpuAny = null;
   let curW = 0;
   let curH = 0;
 
   const ensure = (w: number, h: number): void => {
     if (w === curW && h === curH) return;
-    for (const b of [tex, uni, codesBuf, nitsBuf, codesRead, nitsRead]) if (b) b.destroy();
+    for (const b of [tex, emissTex, uni, codesBuf, histBuf, statsBuf, codesRead, histRead, statsRead]) if (b) b.destroy();
     curW = w;
     curH = h;
     const pixels = w * h;
@@ -228,34 +271,52 @@ export async function createWebGpuConverter(): Promise<HdrFrameConverter> {
       format: "rgba8unorm",
       usage: GU.GPUTextureUsage.COPY_DST | GU.GPUTextureUsage.TEXTURE_BINDING | GU.GPUTextureUsage.RENDER_ATTACHMENT,
     });
-    uni = device.createBuffer({ size: 16, usage: GU.GPUBufferUsage.UNIFORM | GU.GPUBufferUsage.COPY_DST });
+    emissTex = device.createTexture({
+      size: { width: w, height: h },
+      format: "rgba8unorm",
+      usage: GU.GPUTextureUsage.COPY_DST | GU.GPUTextureUsage.TEXTURE_BINDING | GU.GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    uni = device.createBuffer({ size: 32, usage: GU.GPUBufferUsage.UNIFORM | GU.GPUBufferUsage.COPY_DST });
     codesBuf = device.createBuffer({ size: pixels * 4, usage: GU.GPUBufferUsage.STORAGE | GU.GPUBufferUsage.COPY_SRC });
-    nitsBuf = device.createBuffer({ size: pixels * 12, usage: GU.GPUBufferUsage.STORAGE | GU.GPUBufferUsage.COPY_SRC });
+    histBuf = device.createBuffer({ size: HIST_BINS * 4, usage: GU.GPUBufferUsage.STORAGE | GU.GPUBufferUsage.COPY_SRC | GU.GPUBufferUsage.COPY_DST });
+    statsBuf = device.createBuffer({ size: 16, usage: GU.GPUBufferUsage.STORAGE | GU.GPUBufferUsage.COPY_SRC | GU.GPUBufferUsage.COPY_DST });
     codesRead = device.createBuffer({ size: pixels * 4, usage: GU.GPUBufferUsage.COPY_DST | GU.GPUBufferUsage.MAP_READ });
-    nitsRead = device.createBuffer({ size: pixels * 12, usage: GU.GPUBufferUsage.COPY_DST | GU.GPUBufferUsage.MAP_READ });
+    histRead = device.createBuffer({ size: HIST_BINS * 4, usage: GU.GPUBufferUsage.COPY_DST | GU.GPUBufferUsage.MAP_READ });
+    statsRead = device.createBuffer({ size: 16, usage: GU.GPUBufferUsage.COPY_DST | GU.GPUBufferUsage.MAP_READ });
   };
 
   return {
     backend: "webgpu",
-    async convert(canvas: HTMLCanvasElement, peakNits: number, emissive?: Float32Array | null, emissiveNits = 900): Promise<HdrConverted> {
+    async convert(canvas: HTMLCanvasElement, peakNits: number, emissiveCanvas?: HTMLCanvasElement | null, emissiveNits = 900): Promise<HdrConverted> {
       const w = canvas.width;
       const h = canvas.height;
       const pixels = w * h;
       ensure(w, h);
       device.queue.copyExternalImageToTexture({ source: canvas, flipY: false }, { texture: tex }, { width: w, height: h });
-      const ub = new ArrayBuffer(16);
+      const hasEmis = emissiveCanvas ? 1 : 0;
+      if (emissiveCanvas) {
+        device.queue.copyExternalImageToTexture({ source: emissiveCanvas, flipY: false }, { texture: emissTex }, { width: w, height: h });
+      }
+      const ub = new ArrayBuffer(32);
       const udv = new DataView(ub);
       udv.setUint32(0, w, true);
       udv.setUint32(4, h, true);
       udv.setFloat32(8, peakNits, true);
+      udv.setUint32(16, hasEmis, true);
+      udv.setFloat32(20, emissiveNits, true);
       device.queue.writeBuffer(uni, 0, ub);
+      device.queue.writeBuffer(histBuf, 0, zeroHist);
+      device.queue.writeBuffer(statsBuf, 0, zeroStats);
       const bindGroup = device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: tex.createView() },
           { binding: 1, resource: { buffer: codesBuf } },
-          { binding: 2, resource: { buffer: nitsBuf } },
+          { binding: 2, resource: { buffer: histBuf } },
           { binding: 3, resource: { buffer: uni } },
+          { binding: 4, resource: { buffer: statsBuf } },
+          { binding: 5, resource: emissTex.createView() },
+          { binding: 6, resource: sampler },
         ],
       });
       const enc = device.createCommandEncoder();
@@ -264,13 +325,23 @@ export async function createWebGpuConverter(): Promise<HdrFrameConverter> {
       pass.setBindGroup(0, bindGroup);
       pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
       pass.end();
-      enc.copyBufferToBuffer(nitsBuf, 0, nitsRead, 0, pixels * 12);
+      enc.copyBufferToBuffer(codesBuf, 0, codesRead, 0, pixels * 4);
+      enc.copyBufferToBuffer(histBuf, 0, histRead, 0, HIST_BINS * 4);
+      enc.copyBufferToBuffer(statsBuf, 0, statsRead, 0, 16);
       device.queue.submit([enc.finish()]);
-      await nitsRead.mapAsync(GU.GPUMapMode.READ);
-      const nits = new Float32Array(nitsRead.getMappedRange().slice(0));
-      nitsRead.unmap();
-      if (emissive) applyEmissive(nits, emissive, emissiveNits, peakNits);
-      return { gbrp: gbrpFromNits(nits, pixels), measure: measureFrameLinear(nits) };
+      await codesRead.mapAsync(GU.GPUMapMode.READ);
+      await histRead.mapAsync(GU.GPUMapMode.READ);
+      await statsRead.mapAsync(GU.GPUMapMode.READ);
+      const codes = new Uint32Array(codesRead.getMappedRange().slice(0));
+      const hist = new Uint32Array(histRead.getMappedRange().slice(0));
+      const stats = new Uint32Array(statsRead.getMappedRange().slice(0));
+      codesRead.unmap();
+      histRead.unmap();
+      statsRead.unmap();
+      return {
+        gbrp: gbrpFromPacked(codes, pixels),
+        measure: measureFromHistogram(hist, [stats[0], stats[1], stats[2]], stats[3], pixels),
+      };
     },
   };
 }
@@ -296,8 +367,8 @@ export interface HdrStreamOptions {
   /** HdrHost 基址，如 http://127.0.0.1:8712 */
   host: string;
   peakNits?: number;
-  /** 浮点发光层来源（线性 RGBA，可 >1.0）；每帧 renderFrame 后调用，返回 null 则该帧无发光层 */
-  emissive?: () => Float32Array | null;
+  /** 发光层来源（离屏 rgba8 画布：atmos 粒子云 + 歌词辉光）；每帧 renderFrame 后调用，返回 null 则该帧无发光层 */
+  emissive?: () => HTMLCanvasElement | null;
   /** 发光层线性值 → 额外 nit 的增益（默认 900） */
   emissiveNits?: number;
   /** 可选：已解码音频缓冲；传入则连同 HDR 视频一起封装成带音轨的 mp4 */

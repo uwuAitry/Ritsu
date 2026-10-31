@@ -111,6 +111,49 @@ export function measureFrameLinear(nitsRgb: ArrayLike<number>): Hdr10PlusFrameMe
   };
 }
 
+/** 亮度求和时除以的因子（GPU 端 atomicAdd<u32> 防溢出；与 shader 内 /32 一致） */
+export const HDR_SUM_DIV = 32;
+
+/**
+ * 从 GPU 直方图 + 已缩放统计构建单帧参数（与 measureFrameLinear 同口径，直方图近似）。
+ * @param hist 1024 桶（亮度 nit，0..10000 线性分桶）
+ * @param maxScaled [maxR,maxG,maxB] 已缩放亮度（0..100000）
+ * @param sumScaled 每像素 max(r,g,b) 求和后再除以 HDR_SUM_DIV 的整数
+ * @param pixels 像素数
+ */
+export function measureFromHistogram(
+  hist: Uint32Array,
+  maxScaled: readonly number[],
+  sumScaled: number,
+  pixels: number,
+): Hdr10PlusFrameMeasure {
+  const BINS = hist.length;
+  const cum = new Uint32Array(BINS);
+  let acc = 0;
+  for (let i = 0; i < BINS; i += 1) {
+    acc += hist[i];
+    cum[i] = acc;
+  }
+  const nitAt = (p: number): number => {
+    const target = Math.max(1, Math.ceil((p / 100) * pixels));
+    let lo = 0;
+    let hi = BINS - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cum[mid] >= target) hi = mid;
+      else lo = mid + 1;
+    }
+    return ((lo + 0.5) / BINS) * 10000;
+  };
+  const distribution = HDR10PLUS_DISTRIBUTION_INDEXES.map((p) => toScl(nitAt(p)));
+  const avgNits = pixels > 0 ? (sumScaled * HDR_SUM_DIV) / pixels : 0;
+  return {
+    maxScl: [clampScl(maxScaled[0]), clampScl(maxScaled[1]), clampScl(maxScaled[2])],
+    averageRgb: toScl(avgNits),
+    distribution,
+  };
+}
+
 export interface Hdr10PlusJson {
   JSONInfo: { HDR10plusProfile: "A"; Version: "1.0" };
   SceneInfo: Array<{
