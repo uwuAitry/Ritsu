@@ -65,10 +65,21 @@ const EXPORT_MODE_OPTIONS = [
   { value: "hdr", label: "HDR10+（本机）" },
 ];
 const LYRIC_SOURCE_OPTIONS = [
-  { value: "auto", label: "自动（AMLL → LRCLIB）" },
+  { value: "auto", label: "自动（AMLL → LRCLIB → QQ）" },
   { value: "amll", label: "AMLL 逐字 TTML" },
   { value: "lrclib", label: "LRCLIB 行级 LRC" },
+  { value: "qq", label: "QQ 音乐（国内）" },
 ];
+const LYRIC_SOURCE_NAME: Record<LyricSource, string> = {
+  amll: "AMLL 逐字歌词",
+  lrclib: "LRCLIB 行级歌词",
+  qq: "QQ 音乐歌词",
+};
+const LYRIC_SOURCE_BADGE: Record<LyricSource, string> = {
+  amll: "AMLL",
+  lrclib: "LRCLIB",
+  qq: "QQ",
+};
 
 // 输出宽高就近取偶并夹进可编码范围：H.264 yuv420 要求偶数，NaN / 过小归到下限
 function snapEvenSize(v: number): number {
@@ -471,9 +482,9 @@ export default function App() {
     }
   };
 
-  // 「自动」= AMLL 优先、空则换 LRCLIB
+  // 「自动」= AMLL 优先、空则换 LRCLIB，最后国内 QQ 兜底
   const lyricSources = (): LyricSource[] =>
-    lyricSourceChoice === "auto" ? ["amll", "lrclib"] : [lyricSourceChoice];
+    lyricSourceChoice === "auto" ? ["amll", "lrclib", "qq"] : [lyricSourceChoice];
 
   const fetchLyric = async (): Promise<void> => {
     const query = buildQuery();
@@ -493,7 +504,7 @@ export default function App() {
             setLyricCandidates(list);
             setLyricMsg({
               tone: "success",
-              text: src === "amll" ? `AMLL 逐字歌词 · ${list.length} 条` : `LRCLIB 行级歌词 · ${list.length} 条`,
+              text: `${LYRIC_SOURCE_NAME[src]} · ${list.length} 条`,
             });
             return;
           }
@@ -1326,7 +1337,7 @@ export default function App() {
                       </span>
                     </span>
                     <span className="fill-item-badge" data-source={cand.source}>
-                      {cand.source === "amll" ? "AMLL" : "LRCLIB"}
+                      {LYRIC_SOURCE_BADGE[cand.source]}
                     </span>
                   </button>
                 </li>

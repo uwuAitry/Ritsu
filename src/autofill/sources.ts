@@ -1,5 +1,5 @@
-// 多源自动补全：iTunes 补歌曲信息/封面，AMLL 补逐字 TTML，LRCLIB 补行级 LRC。
-// 三个源都是公开 API 且允许跨域直连（Access-Control-Allow-Origin: *），所以不需要自建后端。
+// 多源自动补全：iTunes 补歌曲信息/封面，AMLL 补逐字 TTML，LRCLIB 补行级 LRC，QQ 音乐补国内行级 LRC。
+// iTunes/LRCLIB 直连跨域（Access-Control-Allow-Origin: *）；QQ 无 CORS 头，改走 JSONP（<script> 注入）绕开，同样无需自建后端。
 // 本模块只负责取回候选 / 文本 / Blob，解析与舞台更新交给 App —— 这样这里不引 AMLL 的 ESM 包，
 // 自检才能跟其它模块一样在 Node 的 CommonJS 下跑。
 // 这里不 import ../lyric/load：那会把 AMLL（ESM-only）拉进自检的编译依赖，
@@ -183,9 +183,9 @@ export async function fetchCoverBlob(candidate: MetaCandidate): Promise<Blob | n
   return getBlob(candidate.coverUrl).catch(() => null);
 }
 
-// ── 歌词候选（AMLL 逐字 TTML / LRCLIB 行级 LRC）───────────────
+// ── 歌词候选（AMLL 逐字 TTML / LRCLIB 行级 LRC / QQ 音乐行级 LRC）──────
 
-export type LyricSource = "amll" | "lrclib";
+export type LyricSource = "amll" | "lrclib" | "qq";
 
 /** 单个歌词候选。AMLL 的文件在 load() 里才真正下载，避免一次列几十个文件。 */
 export interface LyricCandidate {
@@ -209,9 +209,9 @@ export async function searchLyricCandidates(
   const title = query.title.trim();
   if (!title) return [];
   const artist = query.artist.trim();
-  return source === "amll"
-    ? searchAmllCandidates(title, artist)
-    : searchLrclibCandidates(title, artist, query.album ?? "", query.durationMs && query.durationMs > 0 ? query.durationMs / 1000 : 0);
+  if (source === "amll") return searchAmllCandidates(title, artist);
+  if (source === "qq") return searchQqCandidates(title, artist);
+  return searchLrclibCandidates(title, artist, query.album ?? "", query.durationMs && query.durationMs > 0 ? query.durationMs / 1000 : 0);
 }
 
 // ── AMLL TTML DB：逐字歌词（主源） ─────────────────────────
@@ -357,4 +357,122 @@ async function searchLrclibCandidates(
       lineCount: countLines(text),
       load: async () => text,
     }));
+}
+
+// ── QQ 音乐：国内可直连的行级 LRC（JSONP）───────────────────────
+// 国内 iTunes/LRCLIB/AMLL 都不通，QQ 是免登录可直连的源。QQ 接口没有 CORS 头，
+// 用 <script> 注入（JSONP）绕开同源限制。注意 c.y.qq.com 的 soso 接口强制 Referer=y.qq.com、
+// 浏览器伪造不了，所以搜索改用 search_cp（实测不校验 Referer），歌词用 u.y.qq.com/musicu.fcg。
+// QQ 匿名只给原文 LRC，trans 恒空（翻译需登录）——所以 QQ 源不带翻译。
+const QQ_SEARCH = "https://c.y.qq.com/soso/fcgi-bin/search_cp";
+const QQ_MUSICU = "https://u.y.qq.com/cgi-bin/musicu.fcg";
+
+export type QqSong = {
+  songmid?: string;
+  songid?: number;
+  songname?: string;
+  singer?: { name?: string }[];
+  albumname?: string;
+  interval?: number;
+};
+
+/** 按标题/歌手给 QQ 候选打分（标题命中×2 + 歌手命中×3，与其它源同构）。 */
+export function scoreQqSong(song: QqSong, wantTitle: string, wantArtist: string): number {
+  const gotTitle = matchKey(song.songname ?? "");
+  const gotArtist = matchKey((song.singer ?? []).map((s) => s.name ?? "").join(""));
+  let n = 0;
+  if (wantTitle && gotTitle === wantTitle) n += 4;
+  else if (wantTitle && gotTitle && (gotTitle.includes(wantTitle) || wantTitle.includes(gotTitle))) n += 2;
+  if (wantArtist && gotArtist === wantArtist) n += 3;
+  else if (wantArtist && gotArtist && (gotArtist.includes(wantArtist) || wantArtist.includes(gotArtist))) n += 1;
+  return n;
+}
+
+/** QQ 歌词是 base64(UTF-8)；atob 得二进制串再按 UTF-8 解码（直接读会因 GBK 乱码）。 */
+export function decodeQqBase64(b64: string): string {
+  const bin = atob(b64.replace(/\s+/g, ""));
+  const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
+  return new TextDecoder("utf-8").decode(bytes);
+}
+
+// ponytail: QQ search_cp 的 JSONP 回调名固定是全局 `callback`（无视传入的 callback 参数），
+// 并发搜索会互相覆盖——本页搜索是串行的，够用；将来要并发就给每个请求套独立 iframe 沙箱。
+function jsonp<T>(url: string, cbName: string = `__ritsu_cb_${Date.now()}_${Math.random().toString(36).slice(2)}`): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const holder = window as unknown as Record<string, unknown>;
+    const script = document.createElement("script");
+    let settled = false;
+    const done = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      delete holder[cbName];
+      script.remove();
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => done(() => reject(new Error("JSONP 超时"))), TIMEOUT_MS);
+    holder[cbName] = (data: T) => done(() => resolve(data));
+    script.onerror = () => done(() => reject(new Error("JSONP 加载失败")));
+    script.src = `${url}${url.includes("?") ? "&" : "?"}callback=${cbName}`;
+    document.head.appendChild(script);
+  });
+}
+
+type QqSearchResp = { data?: { song?: { list?: QqSong[] } } };
+
+async function searchQqCandidates(title: string, artist: string): Promise<LyricCandidate[]> {
+  const keyword = [artist, title].filter(Boolean).join(" ").trim();
+  if (!keyword) return [];
+  const q = new URLSearchParams({ format: "jsonp", w: keyword, p: "1", n: "10", new_json: "1", cr: "1", g_tk: "5381" });
+  let data: QqSearchResp;
+  try {
+    // 回调名固定 "callback"：QQ 硬编码成 callback，即使被回显也对得上。
+    data = await jsonp<QqSearchResp>(`${QQ_SEARCH}?${q.toString()}`, "callback");
+  } catch {
+    return [];
+  }
+  const songs = data?.data?.song?.list ?? [];
+  const wantTitle = matchKey(title);
+  const wantArtist = matchKey(artist);
+  return songs
+    .filter((s) => Boolean(s.songmid && (s.songname ?? "").trim()))
+    .map((s) => ({ s, score: scoreQqSong(s, wantTitle, wantArtist) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, MAX_LYRIC)
+    .map(({ s }, i) => ({
+      id: `qq-${s.songmid ?? i}`,
+      title: (s.songname ?? "").trim() || title,
+      artist: (s.singer ?? []).map((x) => x.name ?? "").filter(Boolean).join(" / "),
+      album: (s.albumname ?? "").trim() || undefined,
+      source: "qq" as const,
+      format: "lrc" as const,
+      synced: true,
+      load: async () => {
+        const text = await fetchQqLyric(s.songmid!, s.songid);
+        if (text == null) throw new Error("QQ 歌词下载失败");
+        return text;
+      },
+    }));
+}
+
+async function fetchQqLyric(songmid: string, songid?: number): Promise<string | null> {
+  const req = {
+    comm: { ct: 24, cv: 4747474, uin: "0" },
+    req: {
+      module: "music.musichallSong.PlayLyricInfo",
+      method: "GetPlayLyricInfo",
+      param: { songMID: songmid, songID: songid ?? 0, lrcType: 1 },
+    },
+  };
+  const q = new URLSearchParams({ format: "jsonp", data: JSON.stringify(req) });
+  let data: { req?: { data?: { lyric?: string } } };
+  try {
+    data = await jsonp(`${QQ_MUSICU}?${q.toString()}`);
+  } catch {
+    return null;
+  }
+  const b64 = data?.req?.data?.lyric;
+  if (!b64) return null;
+  const text = decodeQqBase64(b64);
+  return text.trim() ? text : null;
 }
