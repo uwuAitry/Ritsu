@@ -327,7 +327,9 @@ export class StageRenderer {
    * 读回线性 float RGBA（可 >1.0，由调用方增益）。无 ADM 返回 null。须在 render() 后调用。
    */
   getEmissiveFloat(): Float32Array | null {
-    if (!this.adm) return null;
+    const lyricIdx = this.lastLineIndex;
+    const hasLyric = lyricIdx >= 0;
+    if (!this.adm && !hasLyric) return null;
     const w = this.canvas.width;
     const h = this.canvas.height;
     let ec = this.emissiveCanvas;
@@ -342,7 +344,18 @@ export class StageRenderer {
     ectx.setTransform(1, 0, 0, 1, 0, 0);
     ectx.clearRect(0, 0, w, h);
     ectx.setTransform(this.scale, 0, 0, this.scale, this.offsetX, this.offsetY);
-    ectx.drawImage(this.atmos.canvas, ATMOS_X, ATMOS_Y, ATMOS_W, ATMOS_H);
+    if (this.adm) ectx.drawImage(this.atmos.canvas, ATMOS_X, ATMOS_Y, ATMOS_W, ATMOS_H);
+    if (hasLyric) {
+      const progress = clamp((this.timeMs - this.lineChangeMs) / LYRIC_ANIM_MS, 0, 1);
+      drawLyricLine(
+        ectx,
+        this.lines[lyricIdx],
+        this.timeMs,
+        { x: 110, y: 830, maxWidth: 900 },
+        { progress },
+        { scale: this.scale },
+      );
+    }
     const img = ectx.getImageData(0, 0, w, h).data;
     const out = new Float32Array(w * h * 4);
     for (let i = 0; i < w * h; i += 1) {

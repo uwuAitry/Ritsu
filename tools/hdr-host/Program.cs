@@ -81,7 +81,7 @@ internal static class Program
 
         DateTime t0 = DateTime.UtcNow;
         string file = RunPipeline(raw, w, h, fps, meta, outPath, audio, ffmpeg, ffprobe, tool, work);
-        Console.WriteLine($"PASS: {file} (work={work}, {DateTime.UtcNow - t0:0.0}s)");
+        Console.WriteLine($"PASS: {file} (work={work}, {(DateTime.UtcNow - t0).TotalSeconds:0.0}s)");
         return 0;
     }
 
