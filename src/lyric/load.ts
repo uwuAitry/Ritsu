@@ -13,6 +13,7 @@ import {
   parseYrc,
 } from "@applemusic-like-lyrics/lyric";
 import type { LyricLine } from "@applemusic-like-lyrics/core";
+import { mergeBilingualLrc } from "./bilingual";
 
 export type LyricFormat =
   | "lrc"
@@ -72,11 +73,12 @@ export function parseLyricsText(text: string, format?: LyricFormat): LyricLine[]
   if (!text.trim()) return [];
   const fmt = format ?? detectLyricFormat(text);
   try {
-    return PARSERS[fmt](text);
+    const parsed = PARSERS[fmt](text);
+    return fmt === "lrc" ? mergeBilingualLrc(parsed) : parsed;
   } catch {
     // 解析器抛错时兜底按 LRC 再试一次（空歌词/非歌词文本会走到这里）
     try {
-      return parseLrc(text);
+      return mergeBilingualLrc(parseLrc(text));
     } catch {
       return [];
     }

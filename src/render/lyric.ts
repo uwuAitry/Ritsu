@@ -22,6 +22,7 @@ const MIN_SIZE = 34;
 const BG_SIZE_RATIO = 0.7;
 const TRANSLATION_SIZE = 28;
 const TRANSLATION_OFFSET = 42;
+const TRANSLATION_MIN_SIZE = 20;
 const SLIDE_DISTANCE = 22;
 const FADE_MS = 250;
 const DIM = "rgba(255,255,255,0.42)";
@@ -293,7 +294,14 @@ export function drawLyricLine(
 
   const translation = line.translatedLyric;
   if (translation && translation.length > 0) {
-    ctx.font = `normal ${TRANSLATION_SIZE}px ${FONT_FAMILY}`;
+    // 译文不换行，超宽按比例缩字号（下限 TRANSLATION_MIN_SIZE），避免伸进右侧声场面板。
+    let tSize = TRANSLATION_SIZE;
+    ctx.font = `normal ${tSize}px ${FONT_FAMILY}`;
+    const tWidth = ctx.measureText(translation).width;
+    if (tWidth > layout.maxWidth && tWidth > 0) {
+      tSize = Math.max(TRANSLATION_MIN_SIZE, tSize * (layout.maxWidth / tWidth));
+      ctx.font = `normal ${tSize}px ${FONT_FAMILY}`;
+    }
     ctx.fillStyle = TRANSLATION_COLOR;
     ctx.fillText(translation, layout.x, layout.y + TRANSLATION_OFFSET + slide);
   }
