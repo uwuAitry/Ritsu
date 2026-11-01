@@ -8,6 +8,7 @@ import { runSelfCheck as checkOfflineRender } from "./export/selfcheck";
 import { runSelfCheck as checkHdr10Plus } from "./export/hdr10plus";
 import { runSelfCheck as checkHdrStream } from "./export/hdrStream";
 import { runSelfCheck as checkAutofill } from "./autofill/selfcheck";
+import { runSelfCheck as checkBilingual } from "./lyric/bilingual";
 
 // ponytail: lyric/load 的格式探测自检不在此运行。它经 ./lyric/load 顶层 import
 // @applemusic-like-lyrics/lyric（ESM-only 包），Node 20 的 CommonJS require()
@@ -22,6 +23,8 @@ checkAdm();
 console.log("selfcheck: adm ok");
 checkLyricLayout();
 console.log("selfcheck: lyric-layout ok");
+checkBilingual();
+console.log("selfcheck: lyric-bilingual ok");
 // atmos/selfcheck 只依赖 adm/parse 的 chunk 解析与 activity 纯逻辑，Node 安全。
 checkAtmos();
 console.log("selfcheck: atmos ok");
