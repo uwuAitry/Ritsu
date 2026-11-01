@@ -767,7 +767,7 @@ export default function App() {
           offStage.setTime(t);
           offStage.render();
         },
-        emissive: () => offStage.getEmissiveFloat(),
+        emissive: () => offStage.getEmissiveCanvas(),
         fps: outFps,
         frameCount,
         buffer,

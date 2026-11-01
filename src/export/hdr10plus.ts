@@ -56,18 +56,6 @@ export interface Hdr10PlusScenePos {
 
 export type Hdr10PlusFrame = Hdr10PlusFrameMeasure & Hdr10PlusScenePos;
 
-/** 线性插值百分位（p ∈ [0,100]），输入需已升序 */
-function percentile(sorted: Float64Array, p: number): number {
-  const n = sorted.length;
-  if (n === 0) return 0;
-  if (n === 1) return sorted[0];
-  const rank = (p / 100) * (n - 1);
-  const lo = Math.floor(rank);
-  const hi = Math.ceil(rank);
-  if (lo === hi) return sorted[lo];
-  const t = rank - lo;
-  return sorted[lo] * (1 - t) + sorted[hi] * t;
-}
 
 /**
  * 从线性光 RGB 帧（interleaved r,g,b，单位 nit）统计单帧 ST2094-40 亮度参数。
@@ -76,11 +64,14 @@ function percentile(sorted: Float64Array, p: number): number {
 export function measureFrameLinear(nitsRgb: ArrayLike<number>): Hdr10PlusFrameMeasure {
   const pixels = Math.floor(nitsRgb.length / 3);
   if (pixels <= 0) throw new Error("measureFrameLinear: 空帧");
+  // ponytail: 1024-bin 直方图代替全量排序——2M 像素的 sort 是 O(n log n)，是导出逐帧最贵的一步；
+  // 百分位取 bin 中点，量化误差 ≤10000/1024≈10nit，对 ST2094-40 无感。
+  const BINS = 1024;
+  const hist = new Uint32Array(BINS);
   let maxR = 0;
   let maxG = 0;
   let maxB = 0;
   let sum = 0;
-  const lum = new Float64Array(pixels);
   for (let p = 0; p < pixels; p += 1) {
     const r = nitsRgb[3 * p];
     const g = nitsRgb[3 * p + 1];
@@ -88,15 +79,77 @@ export function measureFrameLinear(nitsRgb: ArrayLike<number>): Hdr10PlusFrameMe
     if (r > maxR) maxR = r;
     if (g > maxG) maxG = g;
     if (b > maxB) maxB = b;
-    const l = Math.max(r, g, b);
-    lum[p] = l;
+    const l = r > g ? (r > b ? r : b) : (g > b ? g : b);
     sum += l;
+    let bin = Math.floor((l / 10000) * BINS);
+    if (bin < 0) bin = 0;
+    else if (bin >= BINS) bin = BINS - 1;
+    hist[bin] += 1;
   }
-  lum.sort();
-  const distribution = HDR10PLUS_DISTRIBUTION_INDEXES.map((p) => toScl(percentile(lum, p)));
+  const cum = new Uint32Array(BINS);
+  let acc = 0;
+  for (let i = 0; i < BINS; i += 1) {
+    acc += hist[i];
+    cum[i] = acc;
+  }
+  const nitAt = (p: number): number => {
+    const target = Math.max(1, Math.ceil((p / 100) * pixels));
+    let lo = 0;
+    let hi = BINS - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cum[mid] >= target) hi = mid;
+      else lo = mid + 1;
+    }
+    return ((lo + 0.5) / BINS) * 10000;
+  };
+  const distribution = HDR10PLUS_DISTRIBUTION_INDEXES.map((p) => toScl(nitAt(p)));
   return {
     maxScl: [toScl(maxR), toScl(maxG), toScl(maxB)],
     averageRgb: toScl(sum / pixels),
+    distribution,
+  };
+}
+
+/** 亮度求和时除以的因子（GPU 端 atomicAdd<u32> 防溢出；与 shader 内 /32 一致） */
+export const HDR_SUM_DIV = 32;
+
+/**
+ * 从 GPU 直方图 + 已缩放统计构建单帧参数（与 measureFrameLinear 同口径，直方图近似）。
+ * @param hist 1024 桶（亮度 nit，0..10000 线性分桶）
+ * @param maxScaled [maxR,maxG,maxB] 已缩放亮度（0..100000）
+ * @param sumScaled 每像素 max(r,g,b) 求和后再除以 HDR_SUM_DIV 的整数
+ * @param pixels 像素数
+ */
+export function measureFromHistogram(
+  hist: Uint32Array,
+  maxScaled: readonly number[],
+  sumScaled: number,
+  pixels: number,
+): Hdr10PlusFrameMeasure {
+  const BINS = hist.length;
+  const cum = new Uint32Array(BINS);
+  let acc = 0;
+  for (let i = 0; i < BINS; i += 1) {
+    acc += hist[i];
+    cum[i] = acc;
+  }
+  const nitAt = (p: number): number => {
+    const target = Math.max(1, Math.ceil((p / 100) * pixels));
+    let lo = 0;
+    let hi = BINS - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cum[mid] >= target) hi = mid;
+      else lo = mid + 1;
+    }
+    return ((lo + 0.5) / BINS) * 10000;
+  };
+  const distribution = HDR10PLUS_DISTRIBUTION_INDEXES.map((p) => toScl(nitAt(p)));
+  const avgNits = pixels > 0 ? (sumScaled * HDR_SUM_DIV) / pixels : 0;
+  return {
+    maxScl: [clampScl(maxScaled[0]), clampScl(maxScaled[1]), clampScl(maxScaled[2])],
+    averageRgb: toScl(avgNits),
     distribution,
   };
 }

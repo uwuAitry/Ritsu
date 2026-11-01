@@ -323,10 +323,11 @@ export class StageRenderer {
   // 不裁剪也不画圆角：Atmos 画布整幅透明（clearColor alpha=0）且对象远在边缘之内，
   // 圆角裁剪只会切到透明像素；边框没了，也没有需要圆角对齐的框。
   /**
-   * 浮点发光层（R2）：把 atmos 粒子云按与 drawAtmosPanel 相同的变换重画到透明离屏画布，
-   * 读回线性 float RGBA（可 >1.0，由调用方增益）。无 ADM 返回 null。须在 render() 后调用。
+  /**
+   * 发光层（R2）：把 atmos 粒子云 + 歌词辉光按与舞台相同的变换画到透明离屏画布，供 WebGPU 作纹理叠加。
+   * 无 ADM 且无歌词时返回 null。须在 render() 后调用。
    */
-  getEmissiveFloat(): Float32Array | null {
+  getEmissiveCanvas(): HTMLCanvasElement | null {
     const lyricIdx = this.lastLineIndex;
     const hasLyric = lyricIdx >= 0;
     if (!this.adm && !hasLyric) return null;
@@ -356,6 +357,19 @@ export class StageRenderer {
         { scale: this.scale },
       );
     }
+    return ec;
+  }
+
+  /**
+   * 兼容旧调用：整幅线性 float RGBA（CPU 转换器用）。无发光层返回 null。须在 render() 后调用。
+   */
+  getEmissiveFloat(): Float32Array | null {
+    const ec = this.getEmissiveCanvas();
+    if (!ec) return null;
+    const w = ec.width;
+    const h = ec.height;
+    const ectx = ec.getContext("2d", { willReadFrequently: true });
+    if (!ectx) return null;
     const img = ectx.getImageData(0, 0, w, h).data;
     const out = new Float32Array(w * h * 4);
     for (let i = 0; i < w * h; i += 1) {
