@@ -1,6 +1,6 @@
 // 自动补全模块的自检：只测纯逻辑（归一化、候选挑选、索引行解析），不碰网络。
 // 放在 CommonJS 下也能跑 —— 本模块不 import AMLL。
-import { matchKey, parseAmllLine, pickItunesTrack } from "./sources";
+import { matchKey, parseAmllLine, pickItunesTrack, decodeQqBase64, scoreQqSong } from "./sources";
 
 function assert(cond: boolean, msg: string): void {
   if (!cond) throw new Error(`autofill self-check failed: ${msg}`);
@@ -58,4 +58,14 @@ export function runSelfCheck(): void {
   assert(parseAmllLine("not json") === null, "非法 JSON 应返回 null");
   assert(parseAmllLine("{}") === null, "缺 rawLyricFile 应返回 null");
   assert(parseAmllLine('{"rawLyricFile":"a.ttml"}') === null, "缺 metadata 应返回 null");
+  // QQ 歌词：base64(UTF-8) 解码，含空白的 base64 也要能解
+  assert(decodeQqBase64("5L2g5aW9") === "你好", "decodeQqBase64 应还原 UTF-8 中文");
+  assert(decodeQqBase64("5L2g\n5aW9") === "你好", "decodeQqBase64 应忽略空白");
+
+  // QQ 候选打分：标题 + 歌手都命中 > 只命中其一 > 都不命中
+  const exact = scoreQqSong({ songname: "Hello", singer: [{ name: "Adele" }] }, "hello", "adele");
+  const worse = scoreQqSong({ songname: "Hello", singer: [{ name: "Adele" }] }, "hello", "someone");
+  const none = scoreQqSong({ songname: "Faded", singer: [{ name: "Alan Walker" }] }, "hello", "adele");
+  assert(exact > worse && worse > none, "scoreQqSong 应随匹配度递减");
+  assert(none === 0, "完全不符应得 0 分");
 }
