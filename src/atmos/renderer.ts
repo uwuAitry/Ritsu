@@ -69,12 +69,12 @@ const TRAIL_TAIL_SCALE = 0.6;
 const TRAIL_OPACITY = 0.22;
 const DEFAULT_TRAIL_MS = 500;
 
-// 球状粒子云：2800 个点铺满球壳，另有 22% 稀薄雾层填出体积感。
+// 球状粒子云：4200 个点铺满球壳，另有 22% 稀薄雾层填出体积感。
 // 不用 PointsMaterial：山峰位移必须在 GPU 上按声源方向实时计算。
-const CLOUD_COUNT = 2800;
+const CLOUD_COUNT = 4200;
 const CLOUD_SEED = 0x5eed;
-const CLOUD_OPACITY = 0.5;
-const CLOUD_POINT_SCALE = 3.4;
+const CLOUD_OPACITY = 0.52;
+const CLOUD_POINT_SCALE = 3.8;
 
 // 声场驱动（ADM → 球壳定向鼓包）：CPU 侧把最强的几个对象归并成固定数量的方向槽，
 // 顶点着色器按 dot(方向法线, 声源方向)^pow 推出球面。多源同时发声时鼓包自然叠加。
@@ -209,7 +209,7 @@ void main() {
     cos(uTime * 0.27 + aPhase * 1.7),
     sin(uTime * 0.23 + aPhase * 0.6)
   );
-  dir = normalize(dir + drift * 0.018);
+  dir = normalize(dir + drift * 0.04);
 
   float push = 0.0;
   vec3 tint = uColorBase;
@@ -229,12 +229,12 @@ void main() {
     sin(uTime * 0.11),
     sin(uTime * 0.083 + 1.7) * 0.75,
     cos(uTime * 0.097 + 0.6) * 0.9
-  ) * 0.02;
-  p *= 1.0 + 0.012 * sin(uTime * 0.55 + aPhase);
+  ) * 0.05;
+  p *= 1.0 + 0.025 * sin(uTime * 0.55 + aPhase);
 
   vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
   gl_Position = projectionMatrix * mvPosition;
-  gl_PointSize = aSize * uPointScale * (uCamDist / max(-mvPosition.z, 0.001)) * (1.0 + push * 1.45);
+  gl_PointSize = aSize * uPointScale * (uCamDist / max(-mvPosition.z, 0.001)) * (1.0 + push * 1.7);
   vColor = tint;
   vAlpha = aAlpha * uOpacity * (0.45 + 1.25 * push);
 }
@@ -696,7 +696,7 @@ export class AtmosRenderer {
       }
       weight[slot] = w;
       dirs[slot].set(px / len, py / len, pz / len);
-      energy[slot] = level;
+      energy[slot] = Math.pow(level, 0.8);
       // 山尖混入对象自己的淡色：近处看是「这团声音顶起来的山」，远处看也不抢对象本体。
       const tint = paleTint(node.color.r * 255, node.color.g * 255, node.color.b * 255, 0.6);
       colors[slot].set(tint[0], tint[1], tint[2]);
@@ -723,7 +723,7 @@ export class AtmosRenderer {
 
     // 整体幅度跟全场总响度：安静段整体缩小，多个声源同响时也按总能量放缩。
     // 方向瓣随空间扩散度变宽缓：声像集中时峰形更清晰，越分散越像整体起伏。
-    this.cloudMaterial.uniforms.uAmp.value = CLOUD_BULGE * (0.2 + 0.8 * Math.min(1, total));
+    this.cloudMaterial.uniforms.uAmp.value = CLOUD_BULGE * (0.35 + 0.65 * Math.min(1, total * 1.4));
     this.cloudMaterial.uniforms.uLobePow.value =
       SHELL_LOBE_POW - (SHELL_LOBE_POW - SHELL_LOBE_POW_MIN) * spread;
     this.updatePulses(peak);

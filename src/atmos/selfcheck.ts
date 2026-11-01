@@ -190,7 +190,7 @@ export function runSelfCheck(): void {
   assert(dark[2] >= dark[0], "暗背景 → 冷白（蓝通道不低于红）");
 
   // ── 球壳鼓包：方向必须真的体现在形状上 ──────────────────
-  // 峰值不再按「相对最响」归一，而是用绝对能量；靠较宽的方向瓣（基准 10、扩散时 8）
+  // 峰值不再按「相对最响」归一，而是用绝对能量；靠较宽的方向瓣（基准 7、扩散时 5）
   // 把六个同时发声的源压成六座圆缓山包，而不是整个球均匀胀大。这里同时验证单源的峰/谷和六源同响时的方向性。
   {
     const dirs = new Float32Array([0, 0, 1]); // 正前方（three 里 +z 朝听者背后，但只要一致即可）
@@ -204,7 +204,7 @@ export function runSelfCheck(): void {
     assert(approx(front, 1), "正对声源的点鼓到满幅");
     assert(side === 0, "侧向 90° 的点完全不动（幂次瓣）");
     assert(back === 0, "背向的点完全不动");
-    assert(off30 < 0.3 && off30 > 0.15, "偏离 30° 已明显下降（圆缓山峰而非整体鼓包）");
+    assert(off30 < 0.42 && off30 > 0.25, "偏离 30° 已有明显下降（宽底山峰而非整体鼓包）");
     const off30Broad = shellPush(Math.sin(Math.PI / 6), 0, Math.cos(Math.PI / 6), dirs, energies, 1, SHELL_LOBE_POW_MIN);
     assert(off30Broad > off30, "空间越扩散，方向瓣越宽缓（pow 降低）");
 
